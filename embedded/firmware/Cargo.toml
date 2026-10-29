@@ -1,0 +1,59 @@
+[package]
+name = "alarmy-firmware"
+version = "0.1.1"
+edition = "2021"
+
+[build-dependencies]
+dotenvy = "0.15"
+
+[dependencies]
+cortex-m-rt = "0.7.5"
+critical-section = "1.2.0"
+cyw43 = { version = "0.7.0" }
+cyw43-pio = { version = "0.10.0" }
+embassy-executor = { version = "0.10.0", features = [
+    "platform-cortex-m",
+    "executor-thread",
+] }
+embassy-net = { version = "0.9.1", features = [ # This the version with the same dependency version as reqwless 0.13
+    "medium-ethernet",
+    "proto-ipv4",
+    "tcp",
+    "dns",
+    "dhcpv4",
+    "dhcpv4-hostname",
+] }
+embassy-usb = { version = "0.6.0" }
+embassy-rp = { version = "0.10.0", features = [
+    "critical-section-impl",
+    "rp2040",
+    "time-driver",
+] }
+embassy-time = { version = "0.5.1" }
+panic-probe = { version = "1.0.0" }
+reqwless = { git = "https://github.com/drogue-iot/reqwless", rev = "68f703dfc16e6f7f964b7238c922c0d433118872" }
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+serde-json-core = { version = "0.6.0" }
+static_cell = "2.1.1"
+portable-atomic = { version = "1.13", features = ["critical-section"] }
+embassy-sync = { version = "0.8.0" }
+heapless = { version = "0.9", features = [
+    "serde",
+] } #this is the version serde-json-core depends on
+embassy-futures = { version = "0.1.2" }
+time = { version = "0.3.47", default-features = false, features = [
+    "serde",
+    "parsing",
+    "macros",
+] }
+embassy-usb-logger = "0.6"
+log = "0.4.29"
+cortex-m = { version = "0.7.7" }
+smart-leds = { version = "0.4.0" }
+micromath = "2.1.0"
+fastrand = { version = "2.3.0", default-features = false }
+embassy-boot-rp = { version = "0.10.0" }
+embedded-storage-async = { version = "0.4.1" }
+embedded-io-async = { version = "0.7.0" }
+ssd1306 = { version = "0.10.0", features = ["async", "graphics"] }
+embedded-graphics = "0.8.2"

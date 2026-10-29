@@ -1,0 +1,11 @@
+
+.history/
+production/
+*.lck
+
+# KiCad local state and backups
+*.kicad_prl
+*-backups/
+*.kicad_pcb-bak
+*.kicad_sch-bak
+fp-info-cache

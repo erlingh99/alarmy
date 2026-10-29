@@ -1,0 +1,8 @@
+# WiFi credentials
+src/config/wifi_config.rs
+
+
+# Build files
+target/
+
+.env

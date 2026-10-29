@@ -1,0 +1,74 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend-checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+      - name: Install dependencies
+        run: uv sync --group dev
+        working-directory: backend
+      - name: Type check
+        run: uv run ty check
+        working-directory: backend
+      - name: Lint
+        run: uv run ruff check
+        working-directory: backend
+      - name: Test
+        run: uv run pytest
+        working-directory: backend
+
+  frontend-checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: frontend
+      - name: Type check
+        run: bun run check
+        working-directory: frontend
+      - name: Lint
+        run: bun run lint
+        working-directory: frontend
+      - name: Test
+        run: bun run test
+        working-directory: frontend
+
+  embedded-checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+      - name: Check
+        run: cargo check
+        working-directory: embedded
+        env:
+          WIFI_SSID: dummy
+          WIFI_PASSWORD: dummy
+      - name: Clippy
+        run: cargo clippy
+        working-directory: embedded
+        env:
+          WIFI_SSID: dummy
+          WIFI_PASSWORD: dummy

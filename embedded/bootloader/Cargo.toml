@@ -1,0 +1,15 @@
+[package]
+name = "alarmy-bootloader"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+cortex-m-rt = "0.7.5"
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+embassy-rp = { version = "0.10.0", features = [
+    "rp2040",
+    "critical-section-impl",
+] }
+embassy-boot-rp = { version = "0.10.0" }
+embassy-sync = { version = "0.8.0" }
+embassy-time = { version = "0.5.0" }

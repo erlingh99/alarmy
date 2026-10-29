@@ -1,0 +1,36 @@
+services:
+  alarmy:
+    container_name: alarmy_backend
+    image: ghcr.io/erlingh99/alarmy:latest
+    platform: linux/arm64
+    dns:
+      - ${DNS_IP}
+    networks:
+      - proxy
+    volumes:
+      - alarmy_data:/app/data
+    restart: unless-stopped
+    labels:
+      - docker-volume-backup.stop-during-backup=alarmy-backup
+
+  alarmy-backup:
+    image: offen/docker-volume-backup:v2
+    container_name: alarmy_backup
+    platform: linux/arm64
+    restart: unless-stopped
+    environment:
+      BACKUP_CRON_EXPRESSION: "0 3 * * *"
+      BACKUP_FILENAME: "alarmy-%Y-%m-%dT%H-%M-%S.tar.gz"
+      BACKUP_RETENTION_DAYS: "30"
+      BACKUP_STOP_DURING_BACKUP_LABEL: "alarmy-backup"
+    volumes:
+      - alarmy_data:/backup/alarmy_data:ro
+      - ${BACKUP_ARCHIVE_ROOT}/alarmy:/archive
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  alarmy_data:
