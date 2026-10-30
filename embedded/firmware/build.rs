@@ -1,27 +1,55 @@
-use dotenvy::dotenv;
 use std::env;
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::fmt::Write;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use memory_layout::{Layout, RegionName};
 
 fn main() {
-    dotenv().ok(); // load .env if present; CI sets vars directly in the environment
-    let ssid = env::var("WIFI_SSID").expect("WIFI_SSID must be set (in .env or environment)");
-    let password =
-        env::var("WIFI_PASSWORD").expect("WIFI_PASSWORD must be set (in .env or environment)");
-    println!("cargo::rustc-env=WIFI_SSID={ssid}");
-    println!("cargo::rustc-env=WIFI_PASSWORD={password}");
-
-    // Put `memory.x` in our output directory and ensure it's
+    // Generate `memory.x` from the shared layout into our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(include_bytes!("memory.x"))
-        .unwrap();
+    let layout = Layout::load(Path::new("../memory_layout.toml"));
+    fs::write(out.join("memory.x"), layout.memory_x(RegionName::Active)).unwrap();
     println!("cargo:rustc-link-search={}", out.display());
 
-    println!("cargo:rerun-if-changed=memory.x");
+    // Expose the regions as `<NAME>_ORIGIN`/`<NAME>_LENGTH` consts (see config/flash_config.rs)
+    let mut consts = String::new();
+    for (name, region) in &layout.regions {
+        writeln!(
+            consts,
+            "pub const {name}_ORIGIN: usize = {:#X};",
+            region.origin
+        )
+        .unwrap();
+        writeln!(
+            consts,
+            "pub const {name}_LENGTH: usize = {:#X};",
+            region.length
+        )
+        .unwrap();
+    }
+    let creds = &layout.wifi_creds;
+    writeln!(
+        consts,
+        "pub const WIFI_CREDS_MAGIC: &[u8; {}] = b{:?};",
+        creds.magic.len(),
+        creds.magic
+    )
+    .unwrap();
+    writeln!(
+        consts,
+        "pub const WIFI_CREDS_MAX_SSID_LEN: usize = {};",
+        creds.max_ssid_len
+    )
+    .unwrap();
+    writeln!(
+        consts,
+        "pub const WIFI_CREDS_PSK_LEN: usize = {};",
+        creds.psk_len
+    )
+    .unwrap();
+    fs::write(out.join("memory_layout.rs"), consts).unwrap();
 
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");

@@ -1,0 +1,22 @@
+# Flash partition layout, shared by the bootloader, the firmware and scripts/flash_blobs.py.
+# Each crate's build.rs generates its linker file (memory.x) from this with the memory-layout crate
+
+[wifi_creds]
+magic        = "AWC2"
+max_ssid_len = 32
+psk_len      = 32   # the stored psk is this long, or empty for an open network
+
+[regions]
+BOOT2            = { origin = 0x10000000, length = 0x100 }      # 256 B
+BOOTLOADER       = { origin = 0x10000100, length = 0x5F00 }     # 24 kB - BOOT2
+BOOTLOADER_STATE = { origin = 0x10006000, length = 0x1000 }     # 4 kB
+WIFI_FW          = { origin = 0x10007000, length = 0x40000 }    # 256 kB
+WIFI_CLM         = { origin = 0x10047000, length = 0x400 }      # 1 kB
+WIFI_NVRAM       = { origin = 0x10048000, length = 0x400 }      # 1 kB
+WIFI_CREDS       = { origin = 0x10049000, length = 0x1000 }     # 4 kB
+ACTIVE           = { origin = 0x1004A000, length = 0xDA000 }    # 872 kB, as large as fits with a same-sized DFU
+DFU              = { origin = 0x10124000, length = 0xDB000 }    # 876 kB, ACTIVE + one 4k page
+OTA_RECORD       = { origin = 0x101FF000, length = 0x1000 }     # 4 kB, versions pending/failed
+END_OF_FLASH     = { origin = 0x10200000, length = 0x0 }        # Marker
+RAM              = { origin = 0x20000000, length = 0x42000 }    # 264 kB
+END_OF_RAM       = { origin = 0x20042000, length = 0x0 }        # Marker

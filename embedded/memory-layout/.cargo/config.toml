@@ -1,0 +1,3 @@
+# Override embedded/.cargo/config.toml's Pico target: this crate is a host-only build dependency
+[build]
+target = "host-tuple"

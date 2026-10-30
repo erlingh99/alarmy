@@ -1,7 +1,8 @@
 use core::cell::RefCell;
 
-use embassy_boot_rp::{AlignedBuffer, BlockingFirmwareUpdater, FirmwareUpdaterConfig};
+use embassy_boot_rp::{AlignedBuffer, BlockingFirmwareUpdater, FirmwareUpdaterConfig, State};
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::gpio::{AnyPin, Level, Output};
 use embassy_rp::peripherals::{FLASH, WATCHDOG};
@@ -10,14 +11,18 @@ use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use serde::Deserialize;
 
-use crate::config::api_config::FIRMWARE_BINARY_ROUTE;
+use crate::config::api_config::{FIRMWARE_BINARY_ROUTE, RETRY_DELAY_S};
 use crate::net::{HttpClientManager, NetworkError};
+
+use super::record::{OtaRecord, Version};
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(8);
+const WATCHDOG_FEED_INTERVAL: Duration = Duration::from_secs(2);
+const BOOT_CONFIRM_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
 // RP2040 flash write alignment — pad partial final chunks to this boundary.
 const WRITE_SIZE: usize = 256;
@@ -49,7 +54,8 @@ pub struct VersionResponse {
     patch: u32,
 }
 
-type FlashMutex = Mutex<NoopRawMutex, RefCell<Flash<'static, FLASH, Blocking, FLASH_SIZE>>>;
+pub(super) type FlashMutex =
+    Mutex<NoopRawMutex, RefCell<Flash<'static, FLASH, Blocking, FLASH_SIZE>>>;
 
 pub struct OtaPinning {
     pub flash: Peri<'static, FLASH>,
@@ -64,6 +70,7 @@ pub struct OtaDriver {
 }
 
 pub static OTA_TRIGGER: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static STOP_WATCHDOG: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 impl OtaDriver {
     pub fn initialize(
@@ -80,22 +87,115 @@ impl OtaDriver {
         let flash = Flash::<_, _, FLASH_SIZE>::new_blocking(pinning.flash);
         let flash = Mutex::new(RefCell::new(flash));
 
-        // Confirm this boot so the bootloader won't revert on watchdog reset.
-        // Silently ignored on a fresh device with an uninitialized state partition.
-        let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&flash, &flash);
-        let mut aligned = AlignedBuffer([0u8; 1]);
-        BlockingFirmwareUpdater::new(config, &mut aligned.0)
-            .mark_booted()
-            .ok();
-
-        watchdog.stop();
-
         let driver = OtaDriver {
             http_client,
             flash,
             download_pin,
         };
-        spawner.spawn(ota_task(driver).unwrap());
+
+        // Fresh off an OTA swap the new image must prove it can still reach the backend (and so
+        // receive the next update) before it is confirmed. Until then the watchdog keeps running,
+        // so a hang or a missed deadline resets into the bootloader, which reverts the swap.
+        let state = driver.updater_state();
+        // The bootloader reverted the last swap: remember that version so it isn't downloaded again
+        if matches!(state, Ok(State::Revert)) {
+            driver.record_failed_update();
+        }
+        // An unreadable state is treated like a swap: better to demand proof than to confirm blindly.
+        let swapped = match state {
+            Ok(state) => matches!(state, State::Swap),
+            Err(e) => {
+                log::error!(
+                    "OTA: Could not read bootloader state ({:?}), requiring confirmation",
+                    e
+                );
+                true
+            }
+        };
+        if swapped {
+            log::info!(
+                "OTA: Running freshly swapped firmware, confirming once the backend is reachable"
+            );
+            spawner.spawn(watchdog_task(watchdog).unwrap());
+        } else {
+            // Silently ignored on a fresh device with an uninitialized state partition.
+            driver.mark_booted().ok();
+            watchdog.stop();
+        }
+
+        spawner.spawn(ota_task(driver, swapped).unwrap());
+    }
+
+    fn updater_state(&self) -> Result<State, OtaError> {
+        let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&self.flash, &self.flash);
+        let mut aligned = AlignedBuffer([0u8; 1]);
+        BlockingFirmwareUpdater::new(config, &mut aligned.0)
+            .get_state()
+            .map_err(|_| OtaError::Flash)
+    }
+
+    /// Confirm this boot so the bootloader won't revert on watchdog reset
+    fn mark_booted(&self) -> Result<(), OtaError> {
+        let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&self.flash, &self.flash);
+        let mut aligned = AlignedBuffer([0u8; 1]);
+        BlockingFirmwareUpdater::new(config, &mut aligned.0)
+            .mark_booted()
+            .map_err(|_| OtaError::Flash)
+    }
+
+    /// Move the version that was being installed to `failed`, after the bootloader reverted it
+    fn record_failed_update(&self) {
+        let mut record = OtaRecord::load(&self.flash);
+        let Some(version) = record.pending.take() else {
+            log::warn!("OTA: Update was reverted, but no attempted version was recorded");
+            return;
+        };
+        log::error!(
+            "OTA: v{}.{}.{} was reverted, it will not be installed again",
+            version.0,
+            version.1,
+            version.2
+        );
+        record.failed = Some(version);
+        if let Err(e) = record.store(&self.flash) {
+            log::error!("OTA: Failed to record the reverted version: {:?}", e);
+        }
+    }
+
+    /// The swapped-in firmware confirmed itself, so its version is no longer in doubt
+    fn clear_pending_update(&self) {
+        let mut record = OtaRecord::load(&self.flash);
+        if record.pending.take().is_some() {
+            if let Err(e) = record.store(&self.flash) {
+                log::error!("OTA: Failed to clear the pending version: {:?}", e);
+            }
+        }
+    }
+
+    /// Wait until the backend answers, then confirm the boot and release the watchdog.
+    /// Retrying is unbounded because the watchdog deadline ends it
+    async fn confirm_boot(&self) {
+        while let Err(e) = self.http_client.get_health().await {
+            log::warn!(
+                "OTA: Backend unreachable, firmware stays unconfirmed ({:?})",
+                e
+            );
+            Timer::after_secs(RETRY_DELAY_S).await;
+        }
+        match self.mark_booted() {
+            Ok(()) => {
+                log::info!("OTA: Backend reachable, firmware confirmed");
+                self.clear_pending_update();
+                STOP_WATCHDOG.signal(());
+            }
+            Err(e) => {
+                log::error!(
+                    "OTA: Failed to confirm firmware, waiting for the watchdog to revert: {:?}",
+                    e
+                );
+                core::future::pending::<()>().await;
+            }
+        }
     }
 
     pub async fn run_update(&self) -> Result<(), OtaError> {
@@ -105,7 +205,17 @@ impl OtaDriver {
             .await
             .map_err(|_| OtaError::Network)?;
 
-        if (resp.major, resp.minor, resp.patch) <= (CURRENT_MAJOR, CURRENT_MINOR, CURRENT_PATCH) {
+        let available = (resp.major, resp.minor, resp.patch);
+        if available <= (CURRENT_MAJOR, CURRENT_MINOR, CURRENT_PATCH) {
+            return Ok(());
+        }
+        if OtaRecord::load(&self.flash).failed == Some(available) {
+            log::warn!(
+                "OTA: v{}.{}.{} failed to boot before, skipping it",
+                resp.major,
+                resp.minor,
+                resp.patch
+            );
             return Ok(());
         }
 
@@ -119,12 +229,12 @@ impl OtaDriver {
             CURRENT_PATCH
         );
 
-        self.download_flash_and_reset().await
+        self.download_flash_and_reset(available).await
     }
 
     /// Streams the firmware binary from the backend into the DFU flash partition,
     /// marks it for swap, and triggers a soft reset. Does not return on success.
-    async fn download_flash_and_reset(&self) -> Result<(), OtaError> {
+    async fn download_flash_and_reset(&self, version: Version) -> Result<(), OtaError> {
         let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&self.flash, &self.flash);
         let mut aligned = AlignedBuffer([0; 1]);
         let mut updater = BlockingFirmwareUpdater::new(config, &mut aligned.0);
@@ -170,8 +280,20 @@ impl OtaDriver {
             flash_offset += padded;
         }
 
+        // Recorded before the swap so the old image can tell what was attempted if it gets
+        // reverted back. If this fails, don't swap: a failure then couldn't be remembered.
+        let record = OtaRecord {
+            pending: Some(version),
+            ..OtaRecord::load(&self.flash)
+        };
+        record.store(&self.flash)?;
+
         log::info!("OTA: {flash_offset} total bytes written, marking DFU for swap");
-        updater.mark_updated().map_err(|_| OtaError::Flash)?;
+        if updater.mark_updated().is_err() {
+            // No swap is scheduled, so don't leave the version recorded as being installed
+            self.clear_pending_update();
+            return Err(OtaError::Flash);
+        }
 
         log::info!("OTA: Resetting...");
         Timer::after_secs(1).await;
@@ -180,7 +302,28 @@ impl OtaDriver {
 }
 
 #[embassy_executor::task]
-pub async fn ota_task(mut driver: OtaDriver) -> ! {
+async fn watchdog_task(mut watchdog: Watchdog) {
+    let deadline = Instant::now() + BOOT_CONFIRM_DEADLINE;
+    loop {
+        match select(STOP_WATCHDOG.wait(), Timer::after(WATCHDOG_FEED_INTERVAL)).await {
+            Either::First(()) => {
+                watchdog.stop();
+                return;
+            }
+            Either::Second(()) if Instant::now() < deadline => watchdog.feed(WATCHDOG_TIMEOUT),
+            Either::Second(()) => {
+                log::error!("OTA: Firmware not confirmed in time, letting the watchdog revert it");
+                return;
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
+pub async fn ota_task(mut driver: OtaDriver, confirm_boot: bool) -> ! {
+    if confirm_boot {
+        driver.confirm_boot().await;
+    }
     loop {
         log::info!("OTA: Checking for firmware update");
         driver.download_pin.set_high();

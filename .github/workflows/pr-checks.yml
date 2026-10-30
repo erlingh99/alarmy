@@ -63,12 +63,10 @@ jobs:
       - name: Check
         run: cargo check
         working-directory: embedded
-        env:
-          WIFI_SSID: dummy
-          WIFI_PASSWORD: dummy
       - name: Clippy
         run: cargo clippy
         working-directory: embedded
-        env:
-          WIFI_SSID: dummy
-          WIFI_PASSWORD: dummy
+      # Host-only build dependency, excluded from the Pico workspace
+      - name: Clippy (memory-layout)
+        run: cargo clippy
+        working-directory: embedded/memory-layout

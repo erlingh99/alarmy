@@ -1,19 +1,20 @@
 use std::env;
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use memory_layout::{Layout, RegionName};
 
 fn main() {
-    // Put `memory.x` in our output directory and ensure it's
+    // Generate `memory.x` from the shared layout into our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(include_bytes!("memory.x"))
-        .unwrap();
+    let layout = Layout::load(Path::new("../memory_layout.toml"));
+    fs::write(
+        out.join("memory.x"),
+        layout.memory_x(RegionName::Bootloader),
+    )
+    .unwrap();
     println!("cargo:rustc-link-search={}", out.display());
-
-    println!("cargo:rerun-if-changed=memory.x");
 
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");

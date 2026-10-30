@@ -1,5 +1,7 @@
 [workspace]
 members = ["bootloader", "firmware"]
+# Host-only build dependency (uses std)
+exclude = ["memory-layout"]
 resolver = "2"
 
 [profile.dev]
@@ -8,7 +10,7 @@ opt-level = 1
 [profile.release]
 lto = true
 codegen-units = 1
-opt-level = "z"
+opt-level = "s"
 debug = false
 strip = "symbols"
 panic = "abort"

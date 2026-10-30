@@ -38,9 +38,6 @@ jobs:
           build-args: |
             BACKEND_HOST=0.0.0.0
             BACKEND_PORT=80
-          secrets: |
-            wifi_ssid=${{ secrets.WIFI_SSID }}
-            wifi_password=${{ secrets.WIFI_PASSWORD }}
 
   deploy:
     name: Deploy to staging

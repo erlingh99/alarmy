@@ -12,14 +12,14 @@ use heapless::{String, Vec};
 use portable_atomic::{AtomicBool, Ordering};
 use static_cell::StaticCell;
 
-use cyw43::{Aligned, Control, JoinOptions, NetDriver, Runner, SpiBus, A4};
+use cyw43::{Aligned, Control, JoinAuth, JoinOptions, NetDriver, Runner, SpiBus, A4};
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 
 use super::http_client::HttpClientManager;
 use super::tcp_server::TcpServer;
 use crate::config::api_config::RETRY_DELAY_S;
 use crate::config::flash_config::{CLM_ADDR, CLM_SIZE, FW_ADDR, FW_SIZE, NVRAM_ADDR, NVRAM_SIZE};
-use crate::config::wifi_config::{WIFI_PASSWORD, WIFI_SSID};
+use crate::config::wifi_config::WifiCredentials;
 use crate::interrupts::Irqs;
 use crate::net::tcp_server::tcp_server_task;
 
@@ -140,17 +140,36 @@ impl NetworkManager {
     }
 }
 
+const MAX_BACKOFF_SHIFT: u32 = 6;
+
 #[embassy_executor::task]
 pub async fn wifi_connect_task(
     mut control: cyw43::Control<'static>,
     client: &'static HttpClientManager,
 ) -> ! {
+    let creds = loop {
+        match WifiCredentials::load() {
+            Ok(creds) => break creds,
+            Err(err) => {
+                // Nothing to do until the device is reflashed with credentials
+                log::error!("No usable WiFi credentials in flash ({err:?}), flash them with scripts/flash_blobs.py");
+                Timer::after_secs(60).await;
+            }
+        }
+    };
+    let join_options = if creds.psk.is_empty() {
+        JoinOptions::new_open()
+    } else {
+        // A prehashed PSK only works for WPA2 (WPA3/SAE needs the passphrase)
+        let mut options = JoinOptions::new(&creds.psk);
+        options.auth = JoinAuth::Wpa2;
+        options.passphrase_is_prehashed = true;
+        options
+    };
+
     let mut connection_attempts = 0;
     loop {
-        match control
-            .join(WIFI_SSID, JoinOptions::new(WIFI_PASSWORD.as_bytes()))
-            .await
-        {
+        match control.join(&creds.ssid, join_options.clone()).await {
             Ok(_) => {
                 log::info!("WiFi connected successfully");
                 connection_attempts = 0;
@@ -183,7 +202,8 @@ pub async fn wifi_connect_task(
         }
         Timer::after_secs(RETRY_DELAY_S << connection_attempts).await; // exponential backoff
         log::info!("Retrying WiFi connection...");
-        connection_attempts += 1;
+        // Cap the backoff at RETRY_DELAY_S << MAX_BACKOFF_SHIFT (5 s * 64 = ~5 min)
+        connection_attempts = (connection_attempts + 1).min(MAX_BACKOFF_SHIFT);
     }
 }
 
