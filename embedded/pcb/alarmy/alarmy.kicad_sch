@@ -9893,7 +9893,7 @@
 				)
 			)
 		)
-		(property "Description" "heartbeat, GP17"
+		(property "Description" "heartbeat, GP2"
 			(at 29.21 203.2 0)
 			(hide yes)
 			(show_name no)
@@ -9972,7 +9972,7 @@
 				)
 			)
 		)
-		(property "Description" "error / panic, GP18"
+		(property "Description" "error / panic, GP4"
 			(at 66.04 203.2 0)
 			(hide yes)
 			(show_name no)
@@ -10792,7 +10792,7 @@
 				)
 			)
 		)
-		(property "Description" "firmware update in progress, GP19"
+		(property "Description" "firmware update in progress, GP3"
 			(at 97.79 203.2 0)
 			(hide yes)
 			(show_name no)

@@ -46,13 +46,17 @@ cargo build --release --bin firmware
 Target is `thumbv6m-none-eabi` (RP2040). See `embedded/README.md` for flashing and `embedded/memory_layout.toml` for the flash partition layout, from which both crates' `build.rs` generate `memory.x` (bootloader / CYW43 firmware blobs / active app / DFU slot — this matters for the OTA update mechanism in `firmware/src/ota/`).
 
 ### PCB (`embedded/pcb/`)
-KiCad 10 carrier board for a socketed Pico W. The schematic and board were originally generated from `scripts/design.py`, but both are now **maintained by hand in KiCad** — the layout is placed and routed manually, so `gen_schematic.py` and `gen_pcb.py --force` are destructive and should not be run casually.
-```bash
-cd embedded/pcb && uv sync
-uv run python scripts/verify_netlist.py   # diffs design.py against the schematic, pad by pad
-uv run python scripts/export_fab.py       # gerbers, drill, BOM, PDFs, STEP -> fab/
-```
-`design.py` survives as the netlist cross-check: keep its parts table in step with the schematic so `verify_netlist.py` keeps catching mis-wired nets and reverted footprints. `scripts/kicad_env.py` puts KiCad's bundled `pcbnew` on the uv environment's path. The board uses a **different GPIO map** from the current firmware (I2C1 GP26/GP27 and strip data GP16 match; buttons are GP14/GP12/GP7, buzzer GP15, status LEDs GP2/GP4/GP3) — `embedded/pcb/README.md` lists the firmware changes that implies.
+KiCad 10 carrier board for a socketed Pico W, **maintained by hand in KiCad** (`embedded/pcb/alarmy/`, custom symbols/footprints in `embedded/pcb/lib/`, JLC fab outputs in `alarmy/production/`).
+
+The firmware's pin map in `firmware/src/main.rs` follows the board's U1 pad nets — the schematic is the source of truth, so a GPIO change on the board means changing `main.rs` to match:
+
+| Net | GPIO | Firmware use |
+|---|---|---|
+| `BTN1` / `BTN2` / `BTN3` | GP14 / GP12 / GP7 | cancel / fetch / display toggle (switch to 3V3, LED + 330R as pull-down) |
+| `BUZZER` | GP15 | PWM slice 7 channel B |
+| `HEARTBEAT` / `UPDATE` / `ERROR` | GP2 / GP3 / GP4 | heartbeat / OTA download / panic LEDs |
+| `WS_DATA_3V3` | GP16 | LED strip data (PIO1), buffered to 5 V by a 74AHCT1G125 |
+| `I2C_SDA` / `I2C_SCL` | GP26 / GP27 | I2C1, SSD1315 OLED |
 
 ### Full stack
 ```bash
