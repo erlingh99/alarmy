@@ -25,12 +25,8 @@ WORKDIR /firmware
 COPY embedded/ .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/firmware/target \
-    --mount=type=secret,id=wifi_ssid \
-    --mount=type=secret,id=wifi_password \
-    export WIFI_SSID="$(cat /run/secrets/wifi_ssid)" && \
-    export WIFI_PASSWORD="$(cat /run/secrets/wifi_password)" && \
-    cargo build --release --bin alarmy-firmware && \
-    cargo objcopy --release --bin alarmy-firmware -- -O binary firmware.bin && \
+    cargo build --release --bin firmware && \
+    cargo objcopy --release --bin firmware -- -O binary firmware.bin && \
     awk -F'"' '/^version/{print $2; exit}' ./firmware/Cargo.toml > version.txt
 
 # Final stage

@@ -37,13 +37,13 @@ bun audit                # dependency vulnerability scan
 ```
 
 ### Embedded (`embedded/firmware/`, `embedded/bootloader/`)
-Requires `WIFI_SSID`/`WIFI_PASSWORD` env vars (or `.env` in `embedded/firmware/`) — `build.rs` fails without them.
+WiFi credentials are not compiled in: like the CYW43 blobs they are preflashed per device at a fixed address (`WIFI_CREDS`, the 4 KB sector after the CYW43 blobs) with `uv run scripts/flash_blobs.py` (picotool), so the public OTA `firmware.bin` holds no secrets.
 ```bash
 cargo check     # from embedded/, checks whole workspace
 cargo clippy
-cargo build --release --bin alarmy-firmware
+cargo build --release --bin firmware
 ```
-Target is `thumbv6m-none-eabi` (RP2040). See `embedded/README.md` for flashing and `embedded/MEMORY_LAYOUT.md` for the flash partition layout (bootloader / CYW43 firmware blobs / active app / DFU slot — this matters for the OTA update mechanism in `firmware/src/ota/`).
+Target is `thumbv6m-none-eabi` (RP2040). See `embedded/README.md` for flashing and `embedded/memory_layout.toml` for the flash partition layout, from which both crates' `build.rs` generate `memory.x` (bootloader / CYW43 firmware blobs / active app / DFU slot — this matters for the OTA update mechanism in `firmware/src/ota/`).
 
 ### PCB (`embedded/pcb/`)
 KiCad 10 carrier board for a socketed Pico W. The schematic and board were originally generated from `scripts/design.py`, but both are now **maintained by hand in KiCad** — the layout is placed and routed manually, so `gen_schematic.py` and `gen_pcb.py --force` are destructive and should not be run casually.
@@ -73,7 +73,7 @@ docker compose up -d --build
 
 ## CI (`.github/workflows/`)
 
-- `pr-checks.yml`: runs backend (`ty check`, `ruff check`, `pytest`), frontend (`tsc`, `eslint`, `vitest`), and embedded (`cargo check`, `cargo clippy` with dummy WiFi secrets) independently — mirror these when validating changes locally.
+- `pr-checks.yml`: runs backend (`ty check`, `ruff check`, `pytest`), frontend (`tsc`, `eslint`, `vitest`), and embedded (`cargo check`, `cargo clippy`) independently — mirror these when validating changes locally.
 - `deploy.yml`: on push to `main`, builds the multi-arch (arm64) Docker image, pushes to GHCR, then SSHes over Tailscale to a staging host and runs `scripts/restart.sh` (which does `docker compose down` then a `git pull` + `docker compose up -d --build` deploy loop).
 
 ## Backups
