@@ -20,6 +20,7 @@ use core::panic::PanicInfo;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::{AnyPin, Level, Output};
 use embassy_rp::multicore::{spawn_core1, Stack};
+use embassy_rp::pwm::{Config as PwmConfig, Pwm};
 use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
@@ -44,7 +45,7 @@ use time_lib::TimeManager;
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
-static mut GPIO15: Option<Output> = None;
+static mut PANIC_LED: Option<Output> = None;
 static PANICKED: AtomicBool = AtomicBool::new(false);
 static LOGGER_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -57,7 +58,7 @@ fn panic(_info: &PanicInfo) -> ! {
         PANICKED.store(true, Ordering::Relaxed);
         unsafe {
             #[allow(static_mut_refs)]
-            if let Some(pin) = &mut GPIO15 {
+            if let Some(pin) = &mut PANIC_LED {
                 pin.set_high();
             }
         }
@@ -85,15 +86,15 @@ fn main() -> ! {
         dma: p.DMA_CH1,
     };
 
+    // GP15 is PWM slice 7, channel B
     let buzzer_pinning = BuzzerPinning {
-        pin: p.PIN_12,
-        pwm_slice: p.PWM_SLICE6,
+        pwm: Pwm::new_output_b(p.PWM_SLICE7, p.PIN_15, PwmConfig::default()),
     };
 
     let ota_pinning = OtaPinning {
         flash: p.FLASH,
         watchdog: p.WATCHDOG,
-        download_pin: p.PIN_18.into(),
+        download_pin: p.PIN_3.into(),
     };
 
     let display_pinning = DisplayPinning {
@@ -104,18 +105,18 @@ fn main() -> ! {
 
     let logging_pinning = LoggingPinning { pin: p.USB };
     let button_pinning = ButtonPinning {
-        cancel: p.PIN_13.into(),
-        fetch: p.PIN_7.into(),
-        display_toggle: p.PIN_19.into(),
+        cancel: p.PIN_14.into(),
+        fetch: p.PIN_12.into(),
+        display_toggle: p.PIN_7.into(),
     };
-    let heartbeat_pinning: Peri<'_, AnyPin> = p.PIN_17.into();
-    let panic_pinning: Peri<'_, AnyPin> = p.PIN_15.into();
+    let heartbeat_pinning: Peri<'_, AnyPin> = p.PIN_2.into();
+    let panic_pinning: Peri<'_, AnyPin> = p.PIN_4.into();
 
     let panic_output = Output::new(panic_pinning, Level::Low);
 
     unsafe {
         #[allow(static_mut_refs)]
-        GPIO15.replace(panic_output);
+        PANIC_LED.replace(panic_output);
     }
 
     spawn_core1(

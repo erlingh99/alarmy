@@ -155,6 +155,12 @@
 		(path "/bab00e01-7204-51e8-937b-ebf5a2e2d1d3")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -371,6 +377,12 @@
 		(path "/f7654f5d-4a99-5c47-9d77-8e6ef0695589")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -571,6 +583,12 @@
 		(path "/ad07be66-a01d-5224-ba86-a687b4d4e1a0")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -855,6 +873,12 @@
 		(path "/f13f0860-52cb-51de-b219-d99f7cfd883c")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -3355,6 +3379,12 @@
 		(path "/29cd423d-dbe6-58fb-a3ba-b0e282c6d1c6")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -3537,6 +3567,12 @@
 		(path "/95bb5a8f-d557-553d-b7da-42982f1e591b")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins)
+			)
+		)
 		(attr exclude_from_bom)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -3661,6 +3697,12 @@
 		(path "/8233bd96-31aa-5c96-8211-49065f4dcfde")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "2" "5" "3" "1" "4")
+			)
+		)
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -4059,6 +4101,12 @@
 		(path "/9d402819-e9ba-5d63-9a90-70bc195848cf")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -4247,6 +4295,12 @@
 		(path "/44029946-cf74-5006-94b0-6f58ca4877e2")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "4" "5" "6" "7" "8" "1" "2" "3")
+			)
+		)
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -4637,6 +4691,12 @@
 		(path "/c3836f18-7926-5331-a49d-8fd0db49ac5d")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2" "3")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -5041,6 +5101,12 @@
 		(path "/20dbe576-31da-568c-978d-cfd103553b11")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -5257,6 +5323,12 @@
 		(path "/8083c63b-c414-527a-ac0d-3d4b90666e00")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -5473,6 +5545,12 @@
 		(path "/87d4d18c-96c9-5079-beae-e0161769bf2e")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -5689,6 +5767,12 @@
 		(path "/1f47da83-4137-55b9-83c8-6198237b009a")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -5885,6 +5969,12 @@
 		(path "/3396934d-559d-5aaa-b662-3fa12bee9a78")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -6105,6 +6195,12 @@
 		(path "/4a41327c-0218-5d98-bb97-f98c4fd1a2cc")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -6401,6 +6497,12 @@
 		(path "/f2c03b51-f195-5485-bd65-13db234174da")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -6763,6 +6865,12 @@
 		(path "/72b53388-c403-5738-beeb-45e1a9bb0e25")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins)
+			)
+		)
 		(attr exclude_from_bom)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -6875,6 +6983,12 @@
 		(path "/aed95e7e-856a-550d-8473-e4e339769fc5")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -7091,6 +7205,12 @@
 		(path "/aebda227-741b-5dc6-8e43-12a7355ad4b7")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -8459,6 +8579,12 @@
 		(path "/0db6555c-90af-50e4-bf85-9af1aacea9e5")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -8678,6 +8804,12 @@
 		(path "/6605dd96-160a-5bb5-bb00-4577006076ec")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -8843,6 +8975,12 @@
 		(path "/69b8b45b-39bb-5cc0-9acc-2ceb3261bbab")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -10581,6 +10719,12 @@
 		(path "/067c9a7b-654f-50ed-9377-ce4ce1190ffc")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -10797,6 +10941,12 @@
 		(path "/6aec1282-79e9-5217-989a-6b3c65dba80b")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -11013,6 +11163,12 @@
 		(path "/f9352bc2-2869-5825-8292-6d0a9d9f8d78")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins)
+			)
+		)
 		(attr exclude_from_bom)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -11117,6 +11273,15 @@
 		(path "/003bd10c-91c7-58eb-ab6b-a331d1242e53")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "30" "37" "1" "2" "4" "5" "6" "7" "9" "10" "11" "12" "14" "15"
+					"16" "17" "19" "20" "39" "40" "3" "23" "28" "18" "13" "38" "8" "36"
+					"21" "22" "24" "25" "26" "27" "29" "35" "31" "32" "34" "33"
+				)
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -12679,6 +12844,12 @@
 		(path "/ed68aa04-4c56-5b9e-93ae-f5679c4dd4eb")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins)
+			)
+		)
 		(attr exclude_from_bom)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -12796,6 +12967,12 @@
 		(path "/d07cc135-6ce5-5fbb-ad25-15621140e15f")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -12981,7 +13158,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" "heartbeat, GP17"
+		(property "Description" "heartbeat, GP2"
 			(at 0 0 180)
 			(layer "B.Fab")
 			(hide yes)
@@ -13010,6 +13187,12 @@
 		(path "/a0c545b9-1949-5cb9-b79a-fe36a1c09574")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -13195,7 +13378,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" "error / panic, GP18"
+		(property "Description" "error / panic, GP4"
 			(at 0 0 180)
 			(layer "B.Fab")
 			(hide yes)
@@ -13224,6 +13407,12 @@
 		(path "/a95ab2bb-b74e-5093-9b3a-5b0276e89770")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -13428,6 +13617,12 @@
 		(path "/5d437428-db3a-51b1-ab12-65a533a6f20c")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2" "3" "4")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_rect
@@ -13682,6 +13877,12 @@
 		(path "/1d30de04-76a8-5368-8c02-4eb15b7e3ffb")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -14047,6 +14248,12 @@
 		(path "/01b958b6-e12f-5116-9413-7425fb9ce2b8")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -14261,6 +14468,12 @@
 		(path "/c0ddb7b0-a990-5269-85e5-c3c1fded9a92")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -14446,7 +14659,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" "firmware update in progress, GP19"
+		(property "Description" "firmware update in progress, GP3"
 			(at 0 0 180)
 			(layer "B.Fab")
 			(hide yes)
@@ -14475,6 +14688,12 @@
 		(path "/d27e0a30-b856-51f9-b88f-cd8edad35f06")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -14679,6 +14898,12 @@
 		(path "/7688a26a-df14-5165-874a-b3c6aed21029")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
@@ -15034,6 +15259,12 @@
 		(path "/6ba67fea-4db0-54c7-bdc5-d78e4fb5df28")
 		(sheetname "/")
 		(sheetfile "alarmy.kicad_sch")
+		(units
+			(unit
+				(name "A")
+				(pins "1" "2")
+			)
+		)
 		(attr through_hole)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line

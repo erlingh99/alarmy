@@ -1,6 +1,5 @@
-use embassy_rp::peripherals::{PIN_12, PWM_SLICE6};
 use embassy_rp::pwm::{Config, Pwm, SetDutyCycle};
-use embassy_rp::{clocks, clocks::RoscRng, Peri};
+use embassy_rp::{clocks, clocks::RoscRng};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
@@ -9,8 +8,7 @@ use crate::buzzer::notes::*;
 use crate::buzzer::songs::{DIE_WITH_A_SMILE, HYMN_FOR_THE_WEEKEND, SHAPE_OF_YOU};
 
 pub struct BuzzerPinning {
-    pub pin: Peri<'static, PIN_12>,
-    pub pwm_slice: Peri<'static, PWM_SLICE6>,
+    pub pwm: Pwm<'static>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,10 +23,9 @@ pub struct BuzzerDriver {
 
 impl BuzzerDriver {
     pub fn new(pinning: BuzzerPinning) -> Self {
-        let config = Config::default();
-        let pwm = Pwm::new_output_a(pinning.pwm_slice, pinning.pin, config.clone());
-        let m = Mutex::new(pwm);
-        BuzzerDriver { pwm: m }
+        BuzzerDriver {
+            pwm: Mutex::new(pinning.pwm),
+        }
     }
 
     pub async fn play_melody(&self) -> Result<(), BuzzerError> {
