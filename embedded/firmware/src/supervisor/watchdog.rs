@@ -18,7 +18,7 @@ static CORE1_CHECK_INS: AtomicU32 = AtomicU32::new(0);
 static CONFIRM_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Call first thing on core0: the bootloader's watchdog is already running
-pub fn initialize(spawner: Spawner, watchdog: Peri<'static, WATCHDOG>) {
+pub fn spawn(spawner: Spawner, watchdog: Peri<'static, WATCHDOG>) {
     let mut watchdog = Watchdog::new(watchdog);
     watchdog.pause_on_debug(true);
     watchdog.start(TIMEOUT);

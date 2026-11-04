@@ -15,7 +15,7 @@ use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::config::flash_config::{PANIC_LOG_ADDR, PANIC_LOG_SIZE};
 use crate::logging::TruncatingWriter;
-use crate::net::HttpClientManager;
+use crate::net::HttpClient;
 
 const COUNT_MAGIC: u32 = 0xC0DE_0000;
 /// Set in scratch 1 while running, so a stale watchdog reset reason isn't counted as a crash
@@ -129,7 +129,7 @@ pub fn init(panic_pinning: Peri<'static, AnyPin>) {
 
 /// Spawn once the network is up
 #[embassy_executor::task]
-pub async fn crash_report(http_client: &'static HttpClientManager) {
+pub async fn crash_report_task(http_client: &'static HttpClient) {
     let crash = unsafe { ptr::read_volatile(CrashRecord::PTR) };
     let watchdog_reset = WATCHDOG_RESET.load(Ordering::Relaxed);
     if !crash.is_valid() && !watchdog_reset {
@@ -148,7 +148,7 @@ pub async fn crash_report(http_client: &'static HttpClientManager) {
 }
 
 #[embassy_executor::task]
-pub async fn stability_monitor() {
+pub async fn stability_task() {
     let panics = panic_count();
     if panics == 0 {
         return;

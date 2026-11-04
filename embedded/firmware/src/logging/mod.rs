@@ -1,4 +1,4 @@
-mod driver;
+mod logger;
 mod truncating_writer;
-pub use driver::{LoggingPinning, MultiLogger};
+pub use logger::{spawn, LoggingPinning};
 pub use truncating_writer::TruncatingWriter;

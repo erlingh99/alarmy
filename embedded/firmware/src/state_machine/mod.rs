@@ -1,4 +1,5 @@
-mod driver;
+mod actor;
 pub(crate) mod types;
 
-pub use driver::StateMachine;
+pub use actor::{handle, spawn, StateHandle};
+pub use types::RunState;

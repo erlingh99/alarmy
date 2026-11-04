@@ -1,29 +1,28 @@
 use core::fmt::Write;
+use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver};
 use embassy_time::{Duration, Timer};
 use heapless::String;
 use serde::Deserialize;
 use smart_leds::RGB8;
 
 use super::http_client::NetworkError;
+use crate::input::{InputHandle, RemoteCommand};
 use crate::led::deserialize::deserialize_hex;
 
 // TCP server configuration
 pub const TCP_SERVER_PORT: u16 = 8080;
 pub const COMMAND_BUFFER_SIZE: usize = 512;
 
-static COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, TcpCommand, 1> = Channel::new();
-
-pub struct TcpServer {
+/// Turns backend commands into input events, answering only `Version` itself
+struct TcpServer {
     stack: &'static Stack<'static>,
-    command_channel: &'static Channel<CriticalSectionRawMutex, TcpCommand, 1>,
+    input: InputHandle,
 }
 
 #[derive(Deserialize, Debug)]
-pub enum TcpCommand {
+enum TcpCommand {
     AlarmsUpdated,
     Idle,
     Fire,
@@ -34,19 +33,13 @@ pub enum TcpCommand {
     Version,
 }
 
+pub fn spawn(spawner: Spawner, stack: &'static Stack<'static>, input: InputHandle) {
+    let server = TcpServer { stack, input };
+    spawner.spawn(tcp_server_task(server).unwrap());
+}
+
 impl TcpServer {
-    pub fn new(stack: &'static Stack<'static>) -> Self {
-        Self {
-            stack,
-            command_channel: &COMMAND_CHANNEL,
-        }
-    }
-
-    pub fn subscribe(&self) -> Receiver<'static, CriticalSectionRawMutex, TcpCommand, 1> {
-        self.command_channel.receiver()
-    }
-
-    pub async fn run(&self) -> ! {
+    async fn run(&self) -> ! {
         log::info!("Starting TCP server on port {TCP_SERVER_PORT}");
 
         let mut rx_buffer = [0; COMMAND_BUFFER_SIZE];
@@ -105,20 +98,7 @@ impl TcpServer {
 
             log::debug!("Received TCP command: {command:?}");
 
-            if matches!(command, TcpCommand::Version) {
-                let mut response = String::<32>::new();
-                let _ = writeln!(response, "VERSION: {}", env!("CARGO_PKG_VERSION"));
-                let _ = socket.write(response.as_bytes()).await;
-                continue;
-            }
-
-            if self.command_channel.try_send(command).is_err() {
-                let response = "ERROR: Command queue full\n";
-                let _ = socket.write(response.as_bytes()).await;
-                continue;
-            }
-
-            let response = "OK: Command queued\n";
+            let response = self.handle_command(command);
             if socket.write(response.as_bytes()).await.is_err() {
                 return Err(NetworkError::TcpError);
             }
@@ -126,9 +106,30 @@ impl TcpServer {
 
         Ok(())
     }
+
+    fn handle_command(&self, command: TcpCommand) -> String<32> {
+        let mut response = String::new();
+        let remote = match command {
+            TcpCommand::Version => {
+                let _ = writeln!(response, "VERSION: {}", env!("CARGO_PKG_VERSION"));
+                return response;
+            }
+            TcpCommand::AlarmsUpdated => RemoteCommand::AlarmsUpdated,
+            TcpCommand::CheckUpdate => RemoteCommand::CheckUpdate,
+            TcpCommand::Idle => RemoteCommand::Idle,
+            TcpCommand::Fire => RemoteCommand::Fire,
+            TcpCommand::Rainbow => RemoteCommand::Rainbow,
+            TcpCommand::Color(c) => RemoteCommand::Color(c),
+        };
+        let _ = match self.input.remote_command(remote) {
+            Ok(()) => writeln!(response, "OK: Command queued"),
+            Err(_) => writeln!(response, "ERROR: Command queue full"),
+        };
+        response
+    }
 }
 
 #[embassy_executor::task]
-pub async fn tcp_server_task(server: &'static TcpServer) -> ! {
+async fn tcp_server_task(server: TcpServer) -> ! {
     server.run().await
 }

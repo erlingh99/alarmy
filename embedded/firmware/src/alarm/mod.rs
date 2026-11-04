@@ -1,4 +1,4 @@
-mod driver;
 pub mod model;
+mod scheduler;
 
-pub use driver::{AlarmDriver, AlarmDriverError};
+pub use scheduler::{handle, spawn, AlarmError, AlarmHandle, AlarmScheduler};

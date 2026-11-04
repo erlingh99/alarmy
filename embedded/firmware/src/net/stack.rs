@@ -15,13 +15,11 @@ use static_cell::StaticCell;
 use cyw43::{Aligned, Control, JoinAuth, JoinOptions, NetDriver, Runner, SpiBus, A4};
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 
-use super::http_client::HttpClientManager;
-use super::tcp_server::TcpServer;
+use super::http_client::HttpClient;
 use crate::config::api_config::RETRY_DELAY_S;
 use crate::config::flash_config::{CLM_ADDR, CLM_SIZE, FW_ADDR, FW_SIZE, NVRAM_ADDR, NVRAM_SIZE};
 use crate::config::wifi_config::WifiCredentials;
 use crate::interrupts::Irqs;
-use crate::net::tcp_server::tcp_server_task;
 
 pub struct NetworkPinning {
     pub pio_pin: Peri<'static, PIO0>,
@@ -35,118 +33,106 @@ pub struct NetworkPinning {
 static STATE: StaticCell<cyw43::State> = StaticCell::new();
 static RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
 static STACK: StaticCell<Stack> = StaticCell::new();
-static HTTP_CLIENT: StaticCell<HttpClientManager> = StaticCell::new();
-static TCP_SERVER: StaticCell<TcpServer> = StaticCell::new();
+static HTTP_CLIENT: StaticCell<HttpClient> = StaticCell::new();
 
 pub static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
 
-pub struct NetworkManager;
+/// Bring up the CYW43 chip and the embassy-net stack, spawning their runners
+async fn setup_stack(
+    spawner: Spawner,
+    pinning: NetworkPinning,
+    seed: u64,
+) -> (&'static mut Stack<'static>, Control<'static>) {
+    log::info!("Initializing network stack...");
 
-impl NetworkManager {
-    /// Initialize the network stack and start background tasks
-    async fn setup_stack(
-        spawner: Spawner,
-        pinning: NetworkPinning,
-        seed: u64,
-    ) -> (&'static mut Stack<'static>, Control<'static>) {
-        log::info!("Initializing network stack...");
+    // Initialize PIO for SPI communication with CYW43
+    let pwr = Output::new(pinning.pwr_pin, Level::Low);
+    let cs = Output::new(pinning.cs_pin, Level::High);
+    let mut pio = Pio::new(pinning.pio_pin, Irqs);
+    let spi = PioSpi::new(
+        &mut pio.common,
+        pio.sm0,
+        DEFAULT_CLOCK_DIVIDER,
+        pio.irq0,
+        cs,
+        pinning.dio_pin,
+        pinning.clk_pin,
+        dma::Channel::new(pinning.dma0, Irqs),
+    );
 
-        // Initialize PIO for SPI communication with CYW43
-        let pwr = Output::new(pinning.pwr_pin, Level::Low);
-        let cs = Output::new(pinning.cs_pin, Level::High);
-        let mut pio = Pio::new(pinning.pio_pin, Irqs);
-        let spi = PioSpi::new(
-            &mut pio.common,
-            pio.sm0,
-            DEFAULT_CLOCK_DIVIDER,
-            pio.irq0,
-            cs,
-            pinning.dio_pin,
-            pinning.clk_pin,
-            dma::Channel::new(pinning.dma0, Irqs),
-        );
+    // CYW43 firmware cyw43 firmware is large, preflash it at known adress and read from those
+    let fw_blob = unsafe { core::slice::from_raw_parts(FW_ADDR, FW_SIZE) };
+    let clm_blob = unsafe { core::slice::from_raw_parts(CLM_ADDR, CLM_SIZE) };
+    let nvram_blob = unsafe { core::slice::from_raw_parts(NVRAM_ADDR, NVRAM_SIZE) };
+    let fw = unsafe { &*(fw_blob as *const [u8] as *const Aligned<A4, [u8]>) };
+    let clm = unsafe { &*(clm_blob as *const [u8] as *const Aligned<A4, [u8]>) };
+    let nvram = unsafe { &*(nvram_blob as *const [u8] as *const Aligned<A4, [u8]>) };
 
-        // CYW43 firmware cyw43 firmware is large, preflash it at known adress and read from those
-        let fw_blob = unsafe { core::slice::from_raw_parts(FW_ADDR, FW_SIZE) };
-        let clm_blob = unsafe { core::slice::from_raw_parts(CLM_ADDR, CLM_SIZE) };
-        let nvram_blob = unsafe { core::slice::from_raw_parts(NVRAM_ADDR, NVRAM_SIZE) };
-        let fw = unsafe { &*(fw_blob as *const [u8] as *const Aligned<A4, [u8]>) };
-        let clm = unsafe { &*(clm_blob as *const [u8] as *const Aligned<A4, [u8]>) };
-        let nvram = unsafe { &*(nvram_blob as *const [u8] as *const Aligned<A4, [u8]>) };
+    // Initialize CYW43 driver
+    let state = STATE.init(cyw43::State::new());
+    let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw, nvram).await;
 
-        // Initialize CYW43 driver
-        let state = STATE.init(cyw43::State::new());
-        let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw, nvram).await;
+    // Start CYW43 background task
+    spawner.spawn(cyw43_task(runner).unwrap());
 
-        // Start CYW43 background task
-        spawner.spawn(cyw43_task(runner).unwrap());
+    // Init control
+    control.init(clm).await;
+    control
+        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .await;
 
-        // Init control
-        control.init(clm).await;
-        control
-            .set_power_management(cyw43::PowerManagementMode::PowerSave)
-            .await;
+    let mut dhcp_config = DhcpConfig::default();
+    dhcp_config.hostname = Some(heapless::String::try_from("alarmy-pico").unwrap());
+    let config = Config::dhcpv4(dhcp_config);
 
-        let mut dhcp_config = DhcpConfig::default();
-        dhcp_config.hostname = Some(heapless::String::try_from("alarmy-pico").unwrap());
-        let config = Config::dhcpv4(dhcp_config);
+    let resources = RESOURCES.init(StackResources::<6>::new());
+    let (stack, runner) = embassy_net::new(net_device, config, resources, seed);
+    // Start network task
+    spawner.spawn(net_task(runner).unwrap());
 
-        let resources = RESOURCES.init(StackResources::<6>::new());
-        let (stack, runner) = embassy_net::new(net_device, config, resources, seed);
-        // Start network task
-        spawner.spawn(net_task(runner).unwrap());
+    let stack_ref = STACK.init(stack);
 
-        let stack_ref = STACK.init(stack);
+    (stack_ref, control)
+}
 
-        (stack_ref, control)
+/// Connect to WiFi, wait for an IP and spawn the network tasks
+pub async fn spawn(
+    spawner: Spawner,
+    pinning: NetworkPinning,
+    log_queue: Receiver<'static, CriticalSectionRawMutex, String<256>, 8>,
+) -> (&'static HttpClient, &'static Stack<'static>) {
+    let seed = RoscRng.next_u64();
+    let (stack, control) = setup_stack(spawner, pinning, seed).await;
+
+    let http_client = HTTP_CLIENT.init(HttpClient::new(stack));
+
+    // Connect to WiFi
+    spawner.spawn(wifi_task(control, http_client).unwrap());
+
+    log::info!("Network stack initialized");
+
+    // Wait for network to be ready
+    log::info!("Waiting for network link...");
+    stack.wait_link_up().await;
+    log::info!("Network link is up, waiting for ip...");
+
+    stack.wait_config_up().await;
+    if let Some(config) = stack.config_v4() {
+        log::info!("Network configured with IP: {}", config.address.address());
+    } else {
+        log::info!("Network configured without IPv4");
     }
 
-    /// Create a new NetworkManager instance
-    pub async fn initialize(
-        spawner: Spawner,
-        pinning: NetworkPinning,
-        log_queue: Receiver<'static, CriticalSectionRawMutex, String<256>, 8>,
-    ) -> (&'static HttpClientManager, &'static TcpServer) {
-        let seed = RoscRng.next_u64();
-        let (stack, control) = Self::setup_stack(spawner, pinning, seed).await;
+    // Start background tasks
+    spawner.spawn(http_log_task(log_queue, http_client).unwrap());
 
-        let http_client = HTTP_CLIENT.init(HttpClientManager::new(stack));
-        let tcp_server = TCP_SERVER.init(TcpServer::new(stack));
-
-        // Connect to WiFi
-        spawner.spawn(wifi_connect_task(control, http_client).unwrap());
-
-        log::info!("Network stack initialized");
-
-        // Wait for network to be ready
-        log::info!("Waiting for network link...");
-        stack.wait_link_up().await;
-        log::info!("Network link is up, waiting for ip...");
-
-        stack.wait_config_up().await;
-        if let Some(config) = stack.config_v4() {
-            log::info!("Network configured with IP: {}", config.address.address());
-        } else {
-            log::info!("Network configured without IPv4");
-        }
-
-        // Start background tasks
-        spawner.spawn(log_over_http(log_queue, http_client).unwrap());
-
-        Timer::after_secs(1).await;
-        spawner.spawn(tcp_server_task(tcp_server).unwrap());
-
-        (http_client, tcp_server)
-    }
+    (http_client, stack)
 }
 
 const MAX_BACKOFF_SHIFT: u32 = 6;
 
 #[embassy_executor::task]
-pub async fn wifi_connect_task(
-    mut control: cyw43::Control<'static>,
-    client: &'static HttpClientManager,
-) -> ! {
+pub async fn wifi_task(mut control: cyw43::Control<'static>, client: &'static HttpClient) -> ! {
     let creds = loop {
         match WifiCredentials::load() {
             Ok(creds) => break creds,
@@ -220,9 +206,9 @@ pub async fn net_task(mut runner: embassy_net::Runner<'static, NetDriver<'static
 }
 
 #[embassy_executor::task]
-pub async fn log_over_http(
+pub async fn http_log_task(
     log_queue: Receiver<'static, CriticalSectionRawMutex, String<256>, 8>,
-    http_client: &'static HttpClientManager,
+    http_client: &'static HttpClient,
 ) -> ! {
     loop {
         let mut batch: Vec<String<256>, 8> = Vec::new();

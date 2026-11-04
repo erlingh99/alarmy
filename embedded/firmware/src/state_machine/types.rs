@@ -1,7 +1,7 @@
 use embassy_time::Instant;
 use smart_leds::RGB8;
 
-use crate::alarm::{model::Alarm, AlarmDriverError};
+use crate::alarm::{model::Alarm, AlarmError};
 use crate::hardware::HardwareError;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,7 +14,6 @@ pub enum RunState {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum SystemState {
     Initializing,
     Running(RunState),
@@ -23,14 +22,13 @@ pub enum SystemState {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum StateError {
-    Alarm(AlarmDriverError),
+    Alarm(AlarmError),
     Hardware(HardwareError),
 }
 
-impl From<AlarmDriverError> for StateError {
-    fn from(e: AlarmDriverError) -> Self {
+impl From<AlarmError> for StateError {
+    fn from(e: AlarmError) -> Self {
         StateError::Alarm(e)
     }
 }

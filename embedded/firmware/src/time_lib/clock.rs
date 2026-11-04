@@ -6,9 +6,9 @@ use static_cell::StaticCell;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::config::api_config::TIME_SYNC_INTERVAL_S;
-use crate::net::HttpClientManager;
+use crate::net::HttpClient;
 
-static TIME_MANAGER: StaticCell<TimeManager> = StaticCell::new();
+static CLOCK: StaticCell<Clock> = StaticCell::new();
 //TODO move over to use the onboard RTC
 
 #[derive(Debug)]
@@ -18,23 +18,23 @@ pub enum TimeError {
     NotSynchronized,
 }
 
-pub struct TimeManager {
-    http_client: &'static HttpClientManager,
+pub struct Clock {
+    http_client: &'static HttpClient,
     time_sync_offset: Mutex<CriticalSectionRawMutex, Option<i64>>,
     utc_offset_seconds: Mutex<CriticalSectionRawMutex, Option<i32>>,
 }
 
-impl TimeManager {
-    pub fn initialize(spawner: Spawner, http_client: &'static HttpClientManager) -> &'static Self {
-        let time_manager = TIME_MANAGER.init(TimeManager {
-            http_client,
-            time_sync_offset: Mutex::new(None),
-            utc_offset_seconds: Mutex::new(None),
-        });
-        spawner.spawn(time_syncer(time_manager).unwrap());
-        time_manager
-    }
+pub fn spawn(spawner: Spawner, http_client: &'static HttpClient) -> &'static Clock {
+    let clock = CLOCK.init(Clock {
+        http_client,
+        time_sync_offset: Mutex::new(None),
+        utc_offset_seconds: Mutex::new(None),
+    });
+    spawner.spawn(clock_task(clock).unwrap());
+    clock
+}
 
+impl Clock {
     /// Synchronize time with time server
     async fn sync_time(&self) -> Result<OffsetDateTime, TimeError> {
         let time_data = self
@@ -86,10 +86,10 @@ impl TimeManager {
 
 /// Background task to periodically sync time
 #[embassy_executor::task]
-async fn time_syncer(time_manager: &'static TimeManager) -> ! {
+async fn clock_task(clock: &'static Clock) -> ! {
     log::info!("Starting time_sync");
     loop {
-        let wait = match time_manager.sync_time().await {
+        let wait = match clock.sync_time().await {
             Ok(_) => {
                 log::info!("Time resync successful");
                 TIME_SYNC_INTERVAL_S

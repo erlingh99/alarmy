@@ -7,7 +7,7 @@ use embassy_sync::mutex::{Mutex, MutexGuard};
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Read as _;
 use heapless::Vec;
-use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
+use reqwless::client::{HttpClient as ReqwlessClient, TlsConfig, TlsVerify};
 use reqwless::headers::ContentType;
 use reqwless::request::{Method, RequestBuilder};
 use serde::Deserialize;
@@ -57,12 +57,12 @@ struct HttpBuffers {
     rx: [u8; 8192],
 }
 
-pub struct HttpClientManager {
+pub struct HttpClient {
     stack: &'static Stack<'static>,
     http_mutex: Mutex<CriticalSectionRawMutex, HttpBuffers>,
 }
 
-impl HttpClientManager {
+impl HttpClient {
     pub fn new(stack: &'static Stack<'static>) -> Self {
         Self {
             stack,
@@ -93,7 +93,8 @@ impl HttpClientManager {
             let tls_config =
                 TlsConfig::new(seed, &mut buf.tls_read, &mut buf.tls_write, TlsVerify::None);
 
-            let mut http_client = HttpClient::new_with_tls(&tcp_client, &dns_client, tls_config);
+            let mut http_client =
+                ReqwlessClient::new_with_tls(&tcp_client, &dns_client, tls_config);
             let request = http_client
                 .request(method, url)
                 .await
@@ -149,7 +150,7 @@ impl HttpClientManager {
             &mut buffers.tls_write,
             TlsVerify::None,
         );
-        let mut http = HttpClient::new_with_tls(&tcp, &dns, tls_config);
+        let mut http = ReqwlessClient::new_with_tls(&tcp, &dns, tls_config);
 
         let mut req = http
             .request(Method::GET, url)

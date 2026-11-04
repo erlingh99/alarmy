@@ -1,3 +1,3 @@
-mod driver;
+mod actor;
 mod record;
-pub use driver::{OtaDriver, OtaPinning, VersionResponse, OTA_TRIGGER};
+pub use actor::{handle, spawn, OtaActor, OtaHandle, OtaPinning, VersionResponse};

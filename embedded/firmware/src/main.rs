@@ -5,18 +5,18 @@ mod alarm;
 mod button;
 mod buzzer;
 mod config;
-mod crash;
 mod display;
 mod hardware;
 mod input;
 mod interrupts;
 mod led;
 mod logging;
+mod mailbox;
 mod net;
 mod ota;
 mod state_machine;
+mod supervisor;
 mod time_lib;
-mod watchdog;
 
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::{AnyPin, Level, Output};
@@ -28,25 +28,22 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
-use alarm::AlarmDriver;
-use button::{button_task, Button, ButtonPinning};
+use button::ButtonPinning;
 use buzzer::{BuzzerDriver, BuzzerPinning};
 use config::display_config::TOGGLE_DEBOUNCE_MS;
-use display::{display_info_publisher, DisplayDriver, DisplayPinning};
-use hardware::HardwareStateMachine;
-use input::InputManager;
+use display::DisplayPinning;
+use input::ButtonId;
 use led::{LedDriver, LedPinning};
-use logging::{LoggingPinning, MultiLogger};
-use net::{NetworkManager, NetworkPinning};
-use ota::{OtaDriver, OtaPinning};
-use state_machine::StateMachine;
-use time_lib::TimeManager;
+use logging::LoggingPinning;
+use net::NetworkPinning;
+use ota::{OtaActor, OtaPinning};
+use supervisor::{crash, watchdog};
 
 const CORE1_STACK_SIZE: usize = 16 * 1024;
 static mut CORE1_STACK: Stack<CORE1_STACK_SIZE> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
-static LOGGER_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static CORE1_START: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -119,7 +116,7 @@ fn main() -> ! {
 
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
-        watchdog::initialize(spawner, watchdog_pinning);
+        watchdog::spawn(spawner, watchdog_pinning);
         spawner.spawn(core0_main(spawner, logging_pinning, network_pinning, ota_pinning).unwrap())
     });
 }
@@ -131,10 +128,10 @@ async fn core0_main(
     network_pinning: NetworkPinning,
     ota_pinning: OtaPinning,
 ) {
-    let http_log_channel = MultiLogger::initialize(spawner, logging_pinning).await;
+    let http_log_channel = logging::spawn(spawner, logging_pinning).await;
 
     //need to sync this with core1 so that logging is not done before the logger is setup
-    LOGGER_READY.signal(());
+    CORE1_START.signal(());
 
     //Now that the logger is setup, we can log!
     log::info!("Starting Pico W Alarm Clock");
@@ -144,30 +141,20 @@ async fn core0_main(
         env!("CARGO_PKG_VERSION_MINOR"),
         env!("CARGO_PKG_VERSION_PATCH")
     );
-    spawner.spawn(crash::stability_monitor().unwrap());
-    let ota_driver = OtaDriver::check_boot(ota_pinning);
+    spawner.spawn(crash::stability_task().unwrap());
+    let ota = OtaActor::check_boot(ota_pinning);
 
-    let (http_client, tcp_server) =
-        NetworkManager::initialize(spawner, network_pinning, http_log_channel).await;
-    spawner.spawn(crash::crash_report(http_client).unwrap());
+    let (http_client, stack) = net::spawn(spawner, network_pinning, http_log_channel).await;
+    spawner.spawn(crash::crash_report_task(http_client).unwrap());
 
-    let time_client = TimeManager::initialize(spawner, http_client);
-    InputManager::initialize(spawner, tcp_server.subscribe());
+    let clock = time_lib::spawn(spawner, http_client);
+    let alarm_scheduler = alarm::spawn(spawner, http_client, clock, state_machine::handle());
+    //TODO being able to fetch a handle to an actor that is not spawned yet is weird
+    display::spawn_info_provider(spawner, clock, alarm_scheduler, display::handle());
 
-    let alarm_driver = AlarmDriver::initialize(
-        spawner,
-        http_client,
-        time_client,
-        InputManager::get_alarm_update_signal(),
-        InputManager::get_alarm_fire_sender(),
-    );
-
-    spawner.spawn(display_info_publisher(time_client, alarm_driver).unwrap());
-
-    ota_driver.start(spawner, http_client);
-    StateMachine::new(InputManager::get_state_change_signal())
-        .run()
-        .await
+    ota::spawn(spawner, ota, http_client);
+    net::tcp_server::spawn(spawner, stack, input::handle());
+    state_machine::spawn(spawner, hardware::handle());
 }
 
 #[embassy_executor::task]
@@ -181,27 +168,40 @@ async fn core1_main(
 ) {
     //core 1 run Hardware and I/O
 
-    LOGGER_READY.wait().await; //Wait for logging to be up before starting setup
+    CORE1_START.wait().await; //Wait for logging to be up before starting setup
 
     let led_driver = LedDriver::new(led_pinning);
     let buzzer_driver = BuzzerDriver::new(buzzer_pinning);
-    let display_driver = DisplayDriver::initialize(spawner, display_pinning);
-    HardwareStateMachine::initialize(spawner, led_driver, buzzer_driver, display_driver);
+    display::spawn(spawner, display_pinning);
+    hardware::spawn(spawner, led_driver, buzzer_driver, display::handle());
 
-    let cancel_button = Button::new(button_pinning.cancel, Duration::from_millis(20));
-    spawner.spawn(button_task(cancel_button, InputManager::get_cancel_alarm_signal()).unwrap());
-    let fetch_button = Button::new(button_pinning.fetch, Duration::from_millis(20));
-    spawner.spawn(button_task(fetch_button, InputManager::get_fetch_request_signal()).unwrap());
-    let display_toggle_button = Button::new(
+    input::spawn(
+        spawner,
+        state_machine::handle(),
+        alarm::handle(),
+        display::handle(),
+        ota::handle(),
+    );
+    button::spawn(
+        spawner,
+        button_pinning.cancel,
+        Duration::from_millis(20),
+        ButtonId::Cancel,
+        input::handle(),
+    );
+    button::spawn(
+        spawner,
+        button_pinning.fetch,
+        Duration::from_millis(20),
+        ButtonId::Fetch,
+        input::handle(),
+    );
+    button::spawn(
+        spawner,
         button_pinning.display_toggle,
         Duration::from_millis(TOGGLE_DEBOUNCE_MS),
-    );
-    spawner.spawn(
-        button_task(
-            display_toggle_button,
-            InputManager::get_display_toggle_signal(),
-        )
-        .unwrap(),
+        ButtonId::DisplayToggle,
+        input::handle(),
     );
 
     let mut heartbeat_pin = Output::new(heartbeat_pinning, Level::Low);

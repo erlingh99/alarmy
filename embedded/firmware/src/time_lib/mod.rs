@@ -1,5 +1,5 @@
+mod clock;
 pub mod deserialize;
-mod driver;
 pub mod model;
 
-pub use driver::TimeManager;
+pub use clock::{spawn, Clock};

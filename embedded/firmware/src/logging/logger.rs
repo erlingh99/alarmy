@@ -26,9 +26,9 @@ static HTTP_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_
 static USB_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY> =
     Channel::new();
 static MULTI_LOGGER: MultiLogger = MultiLogger;
-/// Signalled by logger_task once set_logger_racy has been called, so initialize_logger
+/// Signalled by usb_log_task once set_logger_racy has been called, so spawn
 /// can return only after logging is ready
-static LOGGER_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new(); //NoopRawMutex should be sufficient here
+static LOGGER_REGISTERED: Signal<CriticalSectionRawMutex, ()> = Signal::new(); //NoopRawMutex should be sufficient here
 
 use crate::interrupts::Irqs;
 
@@ -63,21 +63,19 @@ fn push_line(
     });
 }
 
-pub struct MultiLogger;
-
-impl MultiLogger {
-    /// Spawn on a thread mode executor: its wakes (`sev`) reach both cores, so core1 can log
-    pub async fn initialize(
-        spawner: Spawner,
-        pinning: LoggingPinning,
-    ) -> Receiver<'static, CriticalSectionRawMutex, String<LINE_LEN>, 8> {
-        spawner.spawn(logger_task(pinning, &LOGGER_READY).unwrap());
-        // Wait until logger_task has registered the logger via set_logger_racy before returning,
-        // so callers can safely use log! macros immediately after this function resolves.
-        LOGGER_READY.wait().await;
-        HTTP_LOG_CHANNEL.receiver()
-    }
+/// Spawn on a thread mode executor: its wakes (`sev`) reach both cores, so core1 can log
+pub async fn spawn(
+    spawner: Spawner,
+    pinning: LoggingPinning,
+) -> Receiver<'static, CriticalSectionRawMutex, String<LINE_LEN>, 8> {
+    spawner.spawn(usb_log_task(pinning, &LOGGER_REGISTERED).unwrap());
+    // Wait until usb_log_task has registered the logger via set_logger_racy before returning,
+    // so callers can safely use log! macros immediately after this function resolves.
+    LOGGER_REGISTERED.wait().await;
+    HTTP_LOG_CHANNEL.receiver()
 }
+
+struct MultiLogger;
 
 impl Log for MultiLogger {
     fn enabled(&self, _: &Metadata) -> bool {
@@ -97,7 +95,7 @@ impl Log for MultiLogger {
 }
 
 #[embassy_executor::task]
-async fn logger_task(
+async fn usb_log_task(
     pinning: LoggingPinning,
     ready_signal: &'static Signal<CriticalSectionRawMutex, ()>,
 ) -> ! {
