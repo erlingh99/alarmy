@@ -145,7 +145,7 @@ async fn core0_main(
         env!("CARGO_PKG_VERSION_PATCH")
     );
     spawner.spawn(crash::stability_monitor().unwrap());
-    let ota_boot = OtaDriver::check_boot(ota_pinning);
+    let ota_driver = OtaDriver::check_boot(ota_pinning);
 
     let (http_client, tcp_server) =
         NetworkManager::initialize(spawner, network_pinning, http_log_channel).await;
@@ -164,7 +164,7 @@ async fn core0_main(
 
     spawner.spawn(display_info_publisher(time_client, alarm_driver).unwrap());
 
-    OtaDriver::initialize(spawner, http_client, ota_boot);
+    ota_driver.start(spawner, http_client);
     StateMachine::new(InputManager::get_state_change_signal())
         .run()
         .await

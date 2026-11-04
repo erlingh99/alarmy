@@ -13,7 +13,6 @@ use embassy_rp::Peri;
 use embassy_time::Timer;
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::config::api_config::RETRY_DELAY_S;
 use crate::config::flash_config::{PANIC_LOG_ADDR, PANIC_LOG_SIZE};
 use crate::logging::TruncatingWriter;
 use crate::net::HttpClientManager;
@@ -29,6 +28,7 @@ const RECORD_MAGIC: u32 = 0xDEAD_BEEF;
 /// Fits one 256 byte HTTP log line
 const MESSAGE_LEN: usize = 200;
 
+/// Only accessed in init, before core1 starts, or inside a critical section
 static mut PANIC_LED: Option<Output<'static>> = None;
 /// 1-based core handling a crash, 0 if none
 static CRASHED_CORE: AtomicU32 = AtomicU32::new(0);
@@ -92,7 +92,7 @@ fn set_panic_count(count: u32) {
     pac::WATCHDOG.scratch0().write_value(COUNT_MAGIC | count);
 }
 
-fn set_led(on: bool) {
+unsafe fn set_panic_led(on: bool) {
     unsafe {
         #[allow(static_mut_refs)]
         if let Some(led) = &mut PANIC_LED {
@@ -117,7 +117,7 @@ pub fn init(panic_pinning: Peri<'static, AnyPin>) {
     }
 
     let panics = panic_count();
-    set_led(panics > 0);
+    unsafe { set_panic_led(panics > 0) };
     if panics >= MAX_CONSECUTIVE_PANICS {
         // The bootloader leaves the watchdog running
         pac::WATCHDOG.ctrl().modify(|w| w.set_enable(false));
@@ -136,9 +136,7 @@ pub async fn crash_report(http_client: &'static HttpClientManager) {
         return;
     }
     // The HTTP log drops lines it fails to post
-    while http_client.get_health().await.is_err() {
-        Timer::after_secs(RETRY_DELAY_S).await;
-    }
+    http_client.wait_for_backend().await;
 
     if crash.is_valid() {
         log::error!("Crashed on core {}: {}", crash.core, crash.message());
@@ -158,9 +156,18 @@ pub async fn stability_monitor() {
     log::warn!("Recovered from a crash ({panics} in a row)");
 
     Timer::after_secs(STABLE_UPTIME_S).await;
-    set_panic_count(0);
-    set_led(false);
-    log::info!("Running stably again, cleared the crash count");
+    // Excludes fatal(), so a crash happening now is never cleared
+    let cleared = critical_section::with(|_| {
+        if CRASHED_CORE.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        set_panic_count(0);
+        unsafe { set_panic_led(false) };
+        true
+    });
+    if cleared {
+        log::info!("Running stably again, cleared the crash count");
+    }
 }
 
 #[panic_handler]
@@ -185,7 +192,19 @@ fn fatal(message: fmt::Arguments) -> ! {
     cortex_m::interrupt::disable();
 
     let core = pac::SIO.cpuid().read() + 1;
-    match CRASHED_CORE.compare_exchange(0, core, Ordering::AcqRel, Ordering::Relaxed) {
+    // Reentrant on the same core, so a crash inside a critical section doesn't deadlock here.
+    // Released before logging, which needs it.
+    let claimed = critical_section::with(|_| {
+        let claimed = CRASHED_CORE.compare_exchange(0, core, Ordering::AcqRel, Ordering::Relaxed);
+        if claimed.is_ok() {
+            unsafe {
+                set_panic_led(true);
+            }
+            set_panic_count(panic_count() + 1);
+        }
+        claimed
+    });
+    match claimed {
         Ok(_) => {}
         Err(crashed) if crashed == core => reset(),
         // The other core is resetting, reset anyway in case it is blocked on us
@@ -194,9 +213,6 @@ fn fatal(message: fmt::Arguments) -> ! {
             reset();
         }
     }
-
-    set_led(true);
-    set_panic_count(panic_count() + 1);
 
     let record = unsafe { &mut *CrashRecord::PTR };
     record.core = core - 1;

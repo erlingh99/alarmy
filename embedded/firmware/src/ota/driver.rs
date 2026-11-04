@@ -12,7 +12,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use serde::Deserialize;
 
-use crate::config::api_config::{FIRMWARE_BINARY_ROUTE, RETRY_DELAY_S};
+use crate::config::api_config::FIRMWARE_BINARY_ROUTE;
 use crate::crash;
 use crate::net::{HttpClientManager, NetworkError};
 use crate::watchdog;
@@ -63,12 +63,6 @@ pub struct OtaPinning {
 }
 
 pub struct OtaDriver {
-    http_client: &'static HttpClientManager,
-    flash: FlashMutex,
-    download_pin: Output<'static>,
-}
-
-pub struct OtaBootState {
     flash: FlashMutex,
     download_pin: Output<'static>,
     needs_confirmation: bool,
@@ -78,7 +72,7 @@ pub static OTA_TRIGGER: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 impl OtaDriver {
     /// Check the bootloader state at boot. A boot after a swap, arms the watchdog's confirmation deadline
-    pub fn check_boot(pinning: OtaPinning) -> OtaBootState {
+    pub fn check_boot(pinning: OtaPinning) -> Self {
         let flash = Flash::<_, _, FLASH_SIZE>::new_blocking(pinning.flash);
         let flash = Mutex::new(RefCell::new(flash));
         let download_pin = Output::new(pinning.download_pin, Level::Low);
@@ -119,25 +113,15 @@ impl OtaDriver {
             }
         };
 
-        OtaBootState {
+        Self {
             flash,
             download_pin,
             needs_confirmation,
         }
     }
 
-    pub fn initialize(
-        spawner: Spawner,
-        http_client: &'static HttpClientManager,
-        boot_state: OtaBootState,
-    ) {
-        let driver = OtaDriver {
-            http_client,
-            flash: boot_state.flash,
-            download_pin: boot_state.download_pin,
-        };
-        //TODO this function does both the confirmation and the starting
-        spawner.spawn(ota_task(driver, boot_state.needs_confirmation).unwrap());
+    pub fn start(self, spawner: Spawner, http_client: &'static HttpClientManager) {
+        spawner.spawn(ota_task(self, http_client).unwrap());
     }
 
     fn updater_state(flash: &FlashMutex) -> Result<State, OtaError> {
@@ -166,14 +150,9 @@ impl OtaDriver {
     }
 
     /// Retries until the watchdog deadline ends it
-    async fn confirm_boot(&self) {
-        while let Err(e) = self.http_client.get_health().await {
-            log::warn!(
-                "OTA: Backend unreachable, firmware stays unconfirmed ({:?})",
-                e
-            );
-            Timer::after_secs(RETRY_DELAY_S).await;
-        }
+    async fn confirm_boot(&self, http_client: &HttpClientManager) {
+        log::info!("OTA: Waiting for the backend before confirming the firmware");
+        http_client.wait_for_backend().await;
         match Self::mark_booted(&self.flash) {
             Ok(()) => {
                 log::info!("OTA: Backend reachable, firmware confirmed");
@@ -190,9 +169,8 @@ impl OtaDriver {
         }
     }
 
-    async fn run_update(&self) -> Result<(), OtaError> {
-        let resp = self
-            .http_client
+    async fn run_update(&self, http_client: &HttpClientManager) -> Result<(), OtaError> {
+        let resp = http_client
             .get_firmware_version()
             .await
             .map_err(|_| OtaError::Network)?;
@@ -224,12 +202,16 @@ impl OtaDriver {
             CURRENT_PATCH
         );
 
-        self.download_flash_and_reset(available).await
+        self.download_flash_and_reset(http_client, available).await
     }
 
     /// Streams the firmware binary from the backend into the DFU flash partition,
     /// marks it for swap, and triggers a soft reset. Does not return on success.
-    async fn download_flash_and_reset(&self, version: Version) -> Result<(), OtaError> {
+    async fn download_flash_and_reset(
+        &self,
+        http_client: &HttpClientManager,
+        version: Version,
+    ) -> Result<(), OtaError> {
         let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&self.flash, &self.flash);
         let mut aligned = AlignedBuffer([0; 1]);
         let mut updater = BlockingFirmwareUpdater::new(config, &mut aligned.0);
@@ -238,7 +220,7 @@ impl OtaDriver {
         let mut fill = 0usize;
         let mut flash_offset = 0usize;
 
-        self.http_client
+        http_client
             .stream_response(FIRMWARE_BINARY_ROUTE, |chunk| {
                 let mut pos = 0;
                 while pos < chunk.len() {
@@ -292,15 +274,15 @@ impl OtaDriver {
 }
 
 #[embassy_executor::task]
-pub async fn ota_task(mut driver: OtaDriver, confirm_boot: bool) -> ! {
-    if confirm_boot {
-        driver.confirm_boot().await;
+pub async fn ota_task(mut driver: OtaDriver, http_client: &'static HttpClientManager) -> ! {
+    if driver.needs_confirmation {
+        driver.confirm_boot(http_client).await;
     }
 
     loop {
         log::info!("OTA: Checking for firmware update");
         driver.download_pin.set_high();
-        match driver.run_update().await {
+        match driver.run_update(http_client).await {
             Ok(()) => log::info!("OTA: Firmware is up to date"),
             Err(e) => log::error!("OTA: Update failed: {:?}", e),
         }

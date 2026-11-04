@@ -26,7 +26,7 @@ embassy-rp = { version = "0.10.0", features = [
     "critical-section-impl",
     "rp2040",
     "time-driver",
-    "unstable-pac", # the panic handler resets via raw watchdog registers
+    "unstable-pac", # crash handling uses the watchdog scratch, reason and ctrl registers
     "boot2-none", # the bootloader owns BOOT2; a copy in ACTIVE is never run
 ] }
 embassy-time = "0.5.1"

@@ -7,7 +7,6 @@ use embassy_rp::usb::Driver;
 use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver};
-use embassy_sync::pipe::Pipe;
 use embassy_sync::signal::Signal;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config};
@@ -17,13 +16,15 @@ use log::{Level, Log, Metadata, Record};
 use super::TruncatingWriter;
 
 const LINE_LEN: usize = 256;
-const USB_LOG_BUFFER_SIZE: usize = 4096;
+const LOG_LINE_CAPACITY: usize = 8;
 const MAX_PACKET_SIZE: u8 = 64;
 
 /// The oldest line is dropped when full
-static HTTP_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, 8> = Channel::new();
+static HTTP_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY> =
+    Channel::new();
 /// Held until a terminal sets DTR, the oldest lines are dropped when full
-static USB_LOG_PIPE: Pipe<CriticalSectionRawMutex, USB_LOG_BUFFER_SIZE> = Pipe::new();
+static USB_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY> =
+    Channel::new();
 static MULTI_LOGGER: MultiLogger = MultiLogger;
 /// Signalled by logger_task once set_logger_racy has been called, so initialize_logger
 /// can return only after logging is ready
@@ -50,36 +51,15 @@ fn format_record<'a>(record: &Record, buf: &'a mut [u8; LINE_LEN]) -> &'a str {
     writer.finish()
 }
 
-fn push_http(line: &str) {
-    let Ok(line) = String::try_from(line) else {
-        return;
-    };
+fn push_line(
+    channel: &Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY>,
+    line: String<LINE_LEN>,
+) {
     critical_section::with(|_| {
-        if HTTP_LOG_CHANNEL.is_full() {
-            //throw away the oldest line to make room
-            let _ = HTTP_LOG_CHANNEL.try_receive();
+        if channel.is_full() {
+            let _ = channel.try_receive();
         }
-        let _ = HTTP_LOG_CHANNEL.try_send(line);
-    });
-}
-
-fn push_usb(line: &[u8]) {
-    // Whole lines only, never interleaved across cores
-    critical_section::with(|_| {
-        let mut byte = [0];
-        //Throw away the oldest data byte for byte to stop at a full line, untill the new line fits
-        while USB_LOG_PIPE.free_capacity() < line.len() && USB_LOG_PIPE.try_read(&mut byte).is_ok()
-        {
-            while byte[0] != b'\n' && USB_LOG_PIPE.try_read(&mut byte).is_ok() {}
-        }
-        // At most two writes, split at the pipe's wraparound
-        let mut remaining = line;
-        while let Ok(n) = USB_LOG_PIPE.try_write(remaining) {
-            remaining = &remaining[n..];
-            if remaining.is_empty() {
-                break;
-            }
-        }
+        let _ = channel.try_send(line);
     });
 }
 
@@ -106,9 +86,11 @@ impl Log for MultiLogger {
 
     fn log(&self, record: &Record) {
         let mut buf = [0; LINE_LEN];
-        let line = format_record(record, &mut buf);
-        push_usb(line.as_bytes());
-        push_http(line);
+        let Ok(line) = String::try_from(format_record(record, &mut buf)) else {
+            return;
+        };
+        push_line(&USB_LOG_CHANNEL, line.clone());
+        push_line(&HTTP_LOG_CHANNEL, line);
     }
 
     fn flush(&self) {}
@@ -153,7 +135,9 @@ async fn logger_task(
     let mut usb_device = builder.build();
 
     let log_fut = async {
-        let mut packet = [0; MAX_PACKET_SIZE as usize];
+        // Kept until fully sent, so a disconnect mid-line resumes where it left off
+        let mut line = String::<LINE_LEN>::new();
+        let mut sent = 0;
         loop {
             sender.wait_connection().await;
             // Windows drops data sent before DTR
@@ -161,15 +145,24 @@ async fn logger_task(
                 control.control_changed().await;
                 continue;
             }
-            let n = match select(USB_LOG_PIPE.read(&mut packet), control.control_changed()).await {
-                Either::First(n) => n,
-                Either::Second(()) => continue,
-            };
-            if sender.write_packet(&packet[..n]).await.is_err() {
+            if sent == line.len() {
+                line = match select(USB_LOG_CHANNEL.receive(), control.control_changed()).await {
+                    Either::First(line) => line,
+                    Either::Second(()) => continue,
+                };
+                sent = 0;
+            }
+            let n = (line.len() - sent).min(MAX_PACKET_SIZE as usize);
+            if sender
+                .write_packet(&line.as_bytes()[sent..sent + n])
+                .await
+                .is_err()
+            {
                 continue;
             }
+            sent += n;
             // A full packet that ends the data needs a zero-length packet to end the transfer
-            if n == packet.len() && USB_LOG_PIPE.is_empty() {
+            if n == MAX_PACKET_SIZE as usize && sent == line.len() && USB_LOG_CHANNEL.is_empty() {
                 let _ = sender.write_packet(&[]).await;
             }
         }
