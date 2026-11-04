@@ -5,6 +5,7 @@ mod alarm;
 mod button;
 mod buzzer;
 mod config;
+mod crash;
 mod display;
 mod hardware;
 mod input;
@@ -15,8 +16,8 @@ mod net;
 mod ota;
 mod state_machine;
 mod time_lib;
+mod watchdog;
 
-use core::panic::PanicInfo;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::{AnyPin, Level, Output};
 use embassy_rp::multicore::{spawn_core1, Stack};
@@ -25,7 +26,6 @@ use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
-use portable_atomic::{AtomicBool, Ordering};
 use static_cell::StaticCell;
 
 use alarm::AlarmDriver;
@@ -42,30 +42,11 @@ use ota::{OtaDriver, OtaPinning};
 use state_machine::StateMachine;
 use time_lib::TimeManager;
 
-static mut CORE1_STACK: Stack<4096> = Stack::new();
+const CORE1_STACK_SIZE: usize = 16 * 1024;
+static mut CORE1_STACK: Stack<CORE1_STACK_SIZE> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
-static mut PANIC_LED: Option<Output> = None;
-static PANICKED: AtomicBool = AtomicBool::new(false);
 static LOGGER_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    cortex_m::interrupt::disable();
-
-    // Guard against infinite recursion, just in case.
-    if !PANICKED.load(Ordering::Relaxed) {
-        PANICKED.store(true, Ordering::Relaxed);
-        unsafe {
-            #[allow(static_mut_refs)]
-            if let Some(pin) = &mut PANIC_LED {
-                pin.set_high();
-            }
-        }
-    }
-
-    cortex_m::asm::udf();
-}
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -93,9 +74,10 @@ fn main() -> ! {
 
     let ota_pinning = OtaPinning {
         flash: p.FLASH,
-        watchdog: p.WATCHDOG,
         download_pin: p.PIN_3.into(),
     };
+
+    let watchdog_pinning = p.WATCHDOG;
 
     let display_pinning = DisplayPinning {
         i2c: p.I2C1,
@@ -109,15 +91,10 @@ fn main() -> ! {
         fetch: p.PIN_12.into(),
         display_toggle: p.PIN_7.into(),
     };
-    let heartbeat_pinning: Peri<'_, AnyPin> = p.PIN_2.into();
-    let panic_pinning: Peri<'_, AnyPin> = p.PIN_4.into();
+    let heartbeat_pinning: Peri<'static, AnyPin> = p.PIN_2.into();
+    let panic_pinning: Peri<'static, AnyPin> = p.PIN_4.into();
 
-    let panic_output = Output::new(panic_pinning, Level::Low);
-
-    unsafe {
-        #[allow(static_mut_refs)]
-        PANIC_LED.replace(panic_output);
-    }
+    crash::init(panic_pinning);
 
     spawn_core1(
         p.CORE1,
@@ -142,6 +119,7 @@ fn main() -> ! {
 
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
+        watchdog::initialize(spawner, watchdog_pinning);
         spawner.spawn(core0_main(spawner, logging_pinning, network_pinning, ota_pinning).unwrap())
     });
 }
@@ -166,9 +144,12 @@ async fn core0_main(
         env!("CARGO_PKG_VERSION_MINOR"),
         env!("CARGO_PKG_VERSION_PATCH")
     );
+    spawner.spawn(crash::stability_monitor().unwrap());
+    let ota_boot = OtaDriver::check_boot(ota_pinning);
 
     let (http_client, tcp_server) =
         NetworkManager::initialize(spawner, network_pinning, http_log_channel).await;
+    spawner.spawn(crash::crash_report(http_client).unwrap());
 
     let time_client = TimeManager::initialize(spawner, http_client);
     InputManager::initialize(spawner, tcp_server.subscribe());
@@ -183,7 +164,7 @@ async fn core0_main(
 
     spawner.spawn(display_info_publisher(time_client, alarm_driver).unwrap());
 
-    OtaDriver::initialize(spawner, http_client, ota_pinning);
+    OtaDriver::initialize(spawner, http_client, ota_boot);
     StateMachine::new(InputManager::get_state_change_signal())
         .run()
         .await
@@ -226,6 +207,7 @@ async fn core1_main(
     let mut heartbeat_pin = Output::new(heartbeat_pinning, Level::Low);
     loop {
         heartbeat_pin.toggle();
+        watchdog::core1_check_in();
         Timer::after_secs(2).await;
     }
 }

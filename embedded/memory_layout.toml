@@ -14,9 +14,11 @@ WIFI_FW          = { origin = 0x10007000, length = 0x40000 }    # 256 kB
 WIFI_CLM         = { origin = 0x10047000, length = 0x400 }      # 1 kB
 WIFI_NVRAM       = { origin = 0x10048000, length = 0x400 }      # 1 kB
 WIFI_CREDS       = { origin = 0x10049000, length = 0x1000 }     # 4 kB
-ACTIVE           = { origin = 0x1004A000, length = 0xDA000 }    # 872 kB, as large as fits with a same-sized DFU
-DFU              = { origin = 0x10124000, length = 0xDB000 }    # 876 kB, ACTIVE + one 4k page
-OTA_RECORD       = { origin = 0x101FF000, length = 0x1000 }     # 4 kB, versions pending/failed
+UNUSED           = { origin = 0x1004A000, length = 0x1000 }     # 4 kB, too small to grow both Active and DFU
+ACTIVE           = { origin = 0x1004B000, length = 0xDA000 }    # 872 kB, as large as fits with a same-sized DFU
+DFU              = { origin = 0x10125000, length = 0xDB000 }    # 876 kB, ACTIVE + one 4k page
 END_OF_FLASH     = { origin = 0x10200000, length = 0x0 }        # Marker
-RAM              = { origin = 0x20000000, length = 0x42000 }    # 264 kB
+RAM              = { origin = 0x20000000, length = 0x41000 }    # 260 kB
+PANIC_LOG        = { origin = 0x20041000, length = 0x400 }      # 1 kB, crash record, outside both binaries' RAM
+BOOTROM_RAM      = { origin = 0x20041400, length = 0xC00 }      # 3 kB, boot ROM stack and boot2, used at every reset
 END_OF_RAM       = { origin = 0x20042000, length = 0x0 }        # Marker
