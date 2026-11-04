@@ -26,10 +26,10 @@ embassy-rp = { version = "0.10.0", features = [
     "critical-section-impl",
     "rp2040",
     "time-driver",
+    "unstable-pac", # crash handling uses the watchdog scratch, reason and ctrl registers
     "boot2-none", # the bootloader owns BOOT2; a copy in ACTIVE is never run
 ] }
 embassy-time = "0.5.1"
-panic-probe = "1.0.0"
 reqwless = { git = "https://github.com/drogue-iot/reqwless", rev = "68f703dfc16e6f7f964b7238c922c0d433118872" }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde-json-core = "0.6.0"
@@ -43,7 +43,6 @@ time = { version = "0.3.47", default-features = false, features = [
     "parsing",
     "macros",
 ] }
-embassy-usb-logger = "0.6"
 log = "0.4.29"
 smart-leds = "0.4.0"
 micromath = "2.1.0"

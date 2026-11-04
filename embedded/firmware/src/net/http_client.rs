@@ -4,7 +4,7 @@ use embassy_net::Stack;
 use embassy_rp::clocks::RoscRng;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
-use embassy_time::Duration;
+use embassy_time::{Duration, Timer};
 use embedded_io_async::Read as _;
 use heapless::Vec;
 use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::alarm::model::Alarm;
 use crate::config::api_config::{
-    ALARM_SYNC_ROUTE, FIRMWARE_VERSION_ROUTE, HEALTH_ROUTE, LOG_ROUTE, TIME_ROUTE,
+    ALARM_SYNC_ROUTE, FIRMWARE_VERSION_ROUTE, HEALTH_ROUTE, LOG_ROUTE, RETRY_DELAY_S, TIME_ROUTE,
 };
 use crate::ota::VersionResponse;
 use crate::time_lib::model::ApiTimeType;
@@ -224,6 +224,12 @@ impl HttpClientManager {
         match health {
             HealthStatus::Ok => Ok(()),
             _ => Err(NetworkError::BackendDown),
+        }
+    }
+
+    pub async fn wait_for_backend(&self) {
+        while self.get_health().await.is_err() {
+            Timer::after_secs(RETRY_DELAY_S).await;
         }
     }
 

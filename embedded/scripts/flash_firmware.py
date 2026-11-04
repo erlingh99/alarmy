@@ -31,17 +31,14 @@ class Region(NamedTuple):
 class RegionName(StrEnum):
     """The memory_layout.toml regions this script erases"""
     BOOTLOADER_STATE = "BOOTLOADER_STATE"
-    OTA_RECORD = "OTA_RECORD"
 
 
 with open(EMBEDDED_DIR / "memory_layout.toml", "rb") as f:
     _layout = tomllib.load(f)["regions"]
 REGIONS = {name: Region(**_layout[name]) for name in RegionName}
 
-# Erased before flashing: BOOTLOADER_STATE so the freshly flashed firmware isn't reverted by a
-# leftover swap state, OTA_RECORD so a version blacklisted by an earlier failed update can be
-# installed again
-ERASED_REGIONS = [RegionName.BOOTLOADER_STATE, RegionName.OTA_RECORD]
+# Erased before flashing, so the freshly flashed firmware isn't reverted by a leftover swap state
+ERASED_REGIONS = [RegionName.BOOTLOADER_STATE]
 
 
 def main() -> None:

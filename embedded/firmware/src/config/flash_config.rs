@@ -3,7 +3,6 @@
 mod memory_layout {
     include!(concat!(env!("OUT_DIR"), "/memory_layout.rs"));
 }
-use embassy_rp::flash::FLASH_BASE;
 use memory_layout::*;
 pub use memory_layout::{WIFI_CREDS_MAGIC, WIFI_CREDS_MAX_SSID_LEN, WIFI_CREDS_PSK_LEN};
 
@@ -19,13 +18,10 @@ const _: () = assert!(
     FW_SIZE <= WIFI_FW_LENGTH && CLM_SIZE <= WIFI_CLM_LENGTH && NVRAM_SIZE <= WIFI_NVRAM_LENGTH
 );
 
-// OTA bookkeeping sector, as the offset from the start of flash that embassy-rp's Flash driver takes
-// (a fn because FLASH_BASE is a pointer)
-pub fn ota_record_offset() -> u32 {
-    OTA_RECORD_ORIGIN as u32 - FLASH_BASE as u32
-}
-pub const OTA_RECORD_LENGTH: usize = memory_layout::OTA_RECORD_LENGTH;
-
 // Per-device WiFi credentials, preflashed into the sector after the CYW43 blobs (outside ACTIVE/DFU)
 pub const WIFI_CREDS_ADDR: *const u8 = WIFI_CREDS_ORIGIN as *const u8;
 pub const WIFI_CREDS_SIZE: usize = WIFI_CREDS_LENGTH;
+
+// Outside both binaries' RAM, so it survives the reset
+pub const PANIC_LOG_ADDR: usize = PANIC_LOG_ORIGIN;
+pub const PANIC_LOG_SIZE: usize = PANIC_LOG_LENGTH;

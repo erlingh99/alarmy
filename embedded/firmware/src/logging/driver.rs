@@ -1,22 +1,31 @@
 use core::fmt::Write;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_futures::select::{select, Either};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
 use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver, Sender};
+use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
-use embassy_usb::driver::Driver as UsbDriver;
 use embassy_usb::{Builder, Config};
-use embassy_usb_logger::{DummyHandler, UsbLogger};
 use heapless::String;
 use log::{Level, Log, Metadata, Record};
-use static_cell::StaticCell;
 
-static HTTP_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<256>, 8> = Channel::new();
-static MULTI_LOGGER: StaticCell<MultiLogger> = StaticCell::new();
+use super::TruncatingWriter;
+
+const LINE_LEN: usize = 256;
+const LOG_LINE_CAPACITY: usize = 8;
+const MAX_PACKET_SIZE: u8 = 64;
+
+/// The oldest line is dropped when full
+static HTTP_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY> =
+    Channel::new();
+/// Held until a terminal sets DTR, the oldest lines are dropped when full
+static USB_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY> =
+    Channel::new();
+static MULTI_LOGGER: MultiLogger = MultiLogger;
 /// Signalled by logger_task once set_logger_racy has been called, so initialize_logger
 /// can return only after logging is ready
 static LOGGER_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new(); //NoopRawMutex should be sufficient here
@@ -27,7 +36,7 @@ pub struct LoggingPinning {
     pub pin: Peri<'static, USB>,
 }
 
-fn format_record<const N: usize>(record: &Record) -> String<N> {
+fn format_record<'a>(record: &Record, buf: &'a mut [u8; LINE_LEN]) -> &'a str {
     let level = record.level();
     let color = match level {
         Level::Error => "\x1b[0;31m",
@@ -37,77 +46,59 @@ fn format_record<const N: usize>(record: &Record) -> String<N> {
         Level::Trace => "\x1b[0;32m",
     };
     let reset = "\x1b[0m";
-    let mut s = String::new();
-    write!(&mut s, "{color}[{level}]{reset} {}\r\n", record.args()).unwrap_or_default();
-    s
+    let mut writer = TruncatingWriter::new(buf, Some("..."), Some("\r\n"));
+    let _ = write!(writer, "{color}[{level}]{reset} {}", record.args());
+    writer.finish()
 }
 
-struct HttpLogger<const N: usize, const M: usize> {
-    http_log_queue: Sender<'static, CriticalSectionRawMutex, String<N>, M>,
-}
-
-impl<const N: usize, const M: usize> Log for HttpLogger<N, M> {
-    fn enabled(&self, _: &Metadata) -> bool {
-        true
-    }
-
-    fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
-            return;
+fn push_line(
+    channel: &Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY>,
+    line: String<LINE_LEN>,
+) {
+    critical_section::with(|_| {
+        if channel.is_full() {
+            let _ = channel.try_receive();
         }
-        let _ = self.http_log_queue.try_send(format_record(record));
-    }
-
-    fn flush(&self) {}
+        let _ = channel.try_send(line);
+    });
 }
 
-pub struct MultiLogger {
-    usb_logger: UsbLogger<512, DummyHandler>,
-    http_logger: HttpLogger<256, 8>,
-}
+pub struct MultiLogger;
 
 impl MultiLogger {
+    /// Spawn on a thread mode executor: its wakes (`sev`) reach both cores, so core1 can log
     pub async fn initialize(
         spawner: Spawner,
         pinning: LoggingPinning,
-    ) -> Receiver<'static, CriticalSectionRawMutex, String<256>, 8> {
-        spawner.spawn(logger_task(pinning, HTTP_LOG_CHANNEL.sender(), &LOGGER_READY).unwrap());
+    ) -> Receiver<'static, CriticalSectionRawMutex, String<LINE_LEN>, 8> {
+        spawner.spawn(logger_task(pinning, &LOGGER_READY).unwrap());
         // Wait until logger_task has registered the logger via set_logger_racy before returning,
         // so callers can safely use log! macros immediately after this function resolves.
         LOGGER_READY.wait().await;
         HTTP_LOG_CHANNEL.receiver()
     }
-
-    pub async fn create_usb_future_from_class<'d, D>(&'d self, class: CdcAcmClass<'d, D>)
-    where
-        D: UsbDriver<'d>,
-    {
-        self.usb_logger.create_future_from_class(class).await
-    }
 }
 
 impl Log for MultiLogger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        self.usb_logger.enabled(metadata) || self.http_logger.enabled(metadata)
+    fn enabled(&self, _: &Metadata) -> bool {
+        true
     }
 
     fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            self.usb_logger.log(record);
-            self.http_logger.log(record);
-        }
+        let mut buf = [0; LINE_LEN];
+        let Ok(line) = String::try_from(format_record(record, &mut buf)) else {
+            return;
+        };
+        push_line(&USB_LOG_CHANNEL, line.clone());
+        push_line(&HTTP_LOG_CHANNEL, line);
     }
 
-    fn flush(&self) {
-        self.usb_logger.flush();
-        self.http_logger.flush();
-    }
+    fn flush(&self) {}
 }
 
 #[embassy_executor::task]
 async fn logger_task(
     pinning: LoggingPinning,
-    http_log_queue: Sender<'static, CriticalSectionRawMutex, String<256>, 8>,
     ready_signal: &'static Signal<CriticalSectionRawMutex, ()>,
 ) -> ! {
     // Create the driver, from the HAL.
@@ -118,7 +109,7 @@ async fn logger_task(
     config.product = Some("USB-logging");
     config.serial_number = Some("12345678");
     config.max_power = 100;
-    config.max_packet_size_0 = 64;
+    config.max_packet_size_0 = MAX_PACKET_SIZE;
 
     // Create embassy-usb DeviceBuilder using the driver and config.
     // It needs some buffers for building the descriptors.
@@ -138,30 +129,51 @@ async fn logger_task(
     );
 
     // Create a class for the logger
-    let logger_class = CdcAcmClass::new(&mut builder, &mut logger_state, 64);
+    let logger_class = CdcAcmClass::new(&mut builder, &mut logger_state, MAX_PACKET_SIZE as u16);
+    let (mut sender, _, control) = logger_class.split_with_control();
     // Build the builder.
     let mut usb_device = builder.build();
 
-    let usb_logger = UsbLogger::with_custom_style(|record, writer| {
-        let msg = format_record::<256>(record);
-        writer.write_str(msg.as_str()).unwrap();
-    });
-
-    let http_logger = HttpLogger { http_log_queue };
-
-    let logger_ref = MULTI_LOGGER.init(MultiLogger {
-        usb_logger,
-        http_logger,
-    });
-
-    let log_fut = logger_ref.create_usb_future_from_class(logger_class);
+    let log_fut = async {
+        // Kept until fully sent, so a disconnect mid-line resumes where it left off
+        let mut line = String::<LINE_LEN>::new();
+        let mut sent = 0;
+        loop {
+            sender.wait_connection().await;
+            // Windows drops data sent before DTR
+            if !control.dtr() {
+                control.control_changed().await;
+                continue;
+            }
+            if sent == line.len() {
+                line = match select(USB_LOG_CHANNEL.receive(), control.control_changed()).await {
+                    Either::First(line) => line,
+                    Either::Second(()) => continue,
+                };
+                sent = 0;
+            }
+            let n = (line.len() - sent).min(MAX_PACKET_SIZE as usize);
+            if sender
+                .write_packet(&line.as_bytes()[sent..sent + n])
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            sent += n;
+            // A full packet that ends the data needs a zero-length packet to end the transfer
+            if n == MAX_PACKET_SIZE as usize && sent == line.len() && USB_LOG_CHANNEL.is_empty() {
+                let _ = sender.write_packet(&[]).await;
+            }
+        }
+    };
 
     // SAFETY: set_logger_racy is used because we are in a single-threaded async context
     // during initialisation. ready_signal is signalled immediately after, so no log! call
     // can race with this registration.
     unsafe {
-        let _ = log::set_logger_racy(logger_ref)
-            .map(|()| log::set_max_level_racy(log::LevelFilter::Debug));
+        let _ = log::set_logger_racy(&MULTI_LOGGER)
+            .map(|()| log::set_max_level_racy(log::LevelFilter::Info));
     }
 
     // Run the USB device.
