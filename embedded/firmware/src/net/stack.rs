@@ -117,11 +117,11 @@ pub async fn spawn(
     log::info!("Network link is up, waiting for ip...");
 
     stack.wait_config_up().await;
-    if let Some(config) = stack.config_v4() {
+    match stack.config_v4() { Some(config) => {
         log::info!("Network configured with IP: {}", config.address.address());
-    } else {
+    } _ => {
         log::info!("Network configured without IPv4");
-    }
+    }}
 
     // Start background tasks
     spawner.spawn(http_log_task(log_queue, http_client).unwrap());

@@ -1,7 +1,7 @@
 use core::ops::Add;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_futures::select::{Either, select};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 
 use crate::alarm::model::Alarm;
 use crate::hardware::{HardwareError, HardwareHandle};
@@ -143,12 +143,11 @@ impl SystemStateMachine {
                 }
             };
 
-            if let SystemState::Transition(next_run_state) = &next_state {
-                if let SystemState::Running(current_run_state) = &self.state {
-                    if *next_run_state == *current_run_state {
-                        continue;
-                    }
-                }
+            if let SystemState::Transition(next_run_state) = &next_state
+                && let SystemState::Running(current_run_state) = &self.state
+                && *next_run_state == *current_run_state
+            {
+                continue;
             }
 
             self.set_state(next_state);

@@ -1,5 +1,5 @@
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal};
 
 use embassy_time::Timer;
@@ -278,14 +278,11 @@ impl AlarmScheduler {
                         log::info!("Alarms updated, refreshing next alarm");
                     }
                     Either3::Second(_) => {
-                        if time_to_next_alarm.unwrap_or(u32::MAX) <= timeout as u32 {
-                            if let Some(alarm) = next_alarm {
-                                log::info!(
-                                    "Alarm '{}' due, handing off to state machine",
-                                    alarm.name
-                                );
-                                self.state.start_alarm(alarm, 0);
-                            }
+                        if time_to_next_alarm.unwrap_or(u32::MAX) <= timeout as u32
+                            && let Some(alarm) = next_alarm
+                        {
+                            log::info!("Alarm '{}' due, handing off to state machine", alarm.name);
+                            self.state.start_alarm(alarm, 0);
                         }
                     }
                     Either3::Third(_) => {
