@@ -2,13 +2,15 @@
 //! other actors.
 
 use embassy_executor::Spawner;
+use serde::Deserialize;
 use smart_leds::RGB8;
 
 use crate::alarm::AlarmHandle;
 use crate::display::DisplayHandle;
+use crate::hardware::HardwareHandle;
+use crate::led::deserialize::deserialize_hex;
 use crate::mailbox::{Mailbox, MailboxReceiver, MailboxSender};
 use crate::ota::OtaHandle;
-use crate::state_machine::{RunState, StateHandle};
 
 static MAILBOX: Mailbox<InputEvent> = Mailbox::new();
 
@@ -19,13 +21,15 @@ pub enum ButtonId {
     DisplayToggle,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Sent by the backend over TCP
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub enum RemoteCommand {
     AlarmsUpdated,
     CheckUpdate,
     Idle,
     Fire,
     Rainbow,
+    #[serde(deserialize_with = "deserialize_hex")]
     Color(RGB8),
 }
 
@@ -63,27 +67,10 @@ impl InputHandle {
 
 struct InputActor {
     mailbox: MailboxReceiver<InputEvent>,
-    state: StateHandle,
+    hardware: HardwareHandle,
     alarms: AlarmHandle,
     display: DisplayHandle,
     ota: OtaHandle,
-}
-
-pub fn spawn(
-    spawner: Spawner,
-    state: StateHandle,
-    alarms: AlarmHandle,
-    display: DisplayHandle,
-    ota: OtaHandle,
-) {
-    let actor = InputActor {
-        mailbox: MAILBOX.receiver(),
-        state,
-        alarms,
-        display,
-        ota,
-    };
-    spawner.spawn(input_task(actor).unwrap());
 }
 
 impl InputActor {
@@ -98,8 +85,7 @@ impl InputActor {
 
     fn handle_press(&mut self, button: ButtonId) {
         match button {
-            //TODO need to make sure the an alarm is not restarted next tick after cancel
-            ButtonId::Cancel => self.state.request(RunState::Idle),
+            ButtonId::Cancel => self.hardware.idle(),
             ButtonId::Fetch => {
                 log::info!("Manual alarm fetch requested");
                 self.alarms.refresh();
@@ -113,12 +99,29 @@ impl InputActor {
         match command {
             RemoteCommand::AlarmsUpdated => self.alarms.refresh(),
             RemoteCommand::CheckUpdate => self.ota.check_for_update(),
-            RemoteCommand::Idle => self.state.request(RunState::Idle),
-            RemoteCommand::Fire => self.state.request(RunState::Fire),
-            RemoteCommand::Rainbow => self.state.request(RunState::Rainbow),
-            RemoteCommand::Color(c) => self.state.request(RunState::Color(c)),
+            RemoteCommand::Idle => self.hardware.idle(),
+            RemoteCommand::Fire => self.hardware.fire(),
+            RemoteCommand::Rainbow => self.hardware.rainbow(),
+            RemoteCommand::Color(c) => self.hardware.color(c),
         }
     }
+}
+
+pub fn spawn(
+    spawner: Spawner,
+    hardware: HardwareHandle,
+    alarms: AlarmHandle,
+    display: DisplayHandle,
+    ota: OtaHandle,
+) {
+    let actor = InputActor {
+        mailbox: MAILBOX.receiver(),
+        hardware,
+        alarms,
+        display,
+        ota,
+    };
+    spawner.spawn(input_task(actor).unwrap());
 }
 
 #[embassy_executor::task]

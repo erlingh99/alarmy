@@ -7,6 +7,7 @@ mod buzzer;
 mod config;
 mod display;
 mod hardware;
+mod health;
 mod input;
 mod interrupts;
 mod led;
@@ -14,15 +15,14 @@ mod logging;
 mod mailbox;
 mod net;
 mod ota;
-mod state_machine;
 mod supervisor;
 mod time_lib;
 
 use embassy_executor::{Executor, Spawner};
-use embassy_rp::gpio::{AnyPin, Level, Output};
-use embassy_rp::multicore::{spawn_core1, Stack};
-use embassy_rp::pwm::{Config as PwmConfig, Pwm};
 use embassy_rp::Peri;
+use embassy_rp::gpio::{AnyPin, Level, Output};
+use embassy_rp::multicore::{Stack, spawn_core1};
+use embassy_rp::pwm::{Config as PwmConfig, Pwm};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
@@ -30,7 +30,6 @@ use static_cell::StaticCell;
 
 use button::ButtonPinning;
 use buzzer::{BuzzerDriver, BuzzerPinning};
-use config::display_config::TOGGLE_DEBOUNCE_MS;
 use display::DisplayPinning;
 use input::ButtonId;
 use led::{LedDriver, LedPinning};
@@ -128,7 +127,7 @@ async fn core0_main(
     network_pinning: NetworkPinning,
     ota_pinning: OtaPinning,
 ) {
-    let http_log_channel = logging::spawn(spawner, logging_pinning).await;
+    logging::spawn(spawner, logging_pinning).await;
 
     //need to sync this with core1 so that logging is not done before the logger is setup
     CORE1_START.signal(());
@@ -141,20 +140,18 @@ async fn core0_main(
         env!("CARGO_PKG_VERSION_MINOR"),
         env!("CARGO_PKG_VERSION_PATCH")
     );
-    spawner.spawn(crash::stability_task().unwrap());
+    crash::spawn_stability(spawner);
     let ota = OtaActor::check_boot(ota_pinning);
 
-    let (http_client, stack) = net::spawn(spawner, network_pinning, http_log_channel).await;
-    spawner.spawn(crash::crash_report_task(http_client).unwrap());
+    let (http_client, stack) = net::spawn(spawner, network_pinning).await;
+    logging::spawn_http_log(spawner, http_client);
+    crash::spawn_report(spawner, http_client);
 
-    let clock = time_lib::spawn(spawner, http_client);
-    let alarm_scheduler = alarm::spawn(spawner, http_client, clock, state_machine::handle());
-    //TODO being able to fetch a handle to an actor that is not spawned yet is weird
-    display::spawn_info_provider(spawner, clock, alarm_scheduler, display::handle());
+    time_lib::spawn(spawner, http_client);
+    alarm::spawn(spawner, http_client, hardware::handle());
 
     ota::spawn(spawner, ota, http_client);
     net::tcp_server::spawn(spawner, stack, input::handle());
-    state_machine::spawn(spawner, hardware::handle());
 }
 
 #[embassy_executor::task]
@@ -173,11 +170,11 @@ async fn core1_main(
     let led_driver = LedDriver::new(led_pinning);
     let buzzer_driver = BuzzerDriver::new(buzzer_pinning);
     display::spawn(spawner, display_pinning);
-    hardware::spawn(spawner, led_driver, buzzer_driver, display::handle());
+    hardware::spawn(spawner, led_driver, buzzer_driver);
 
     input::spawn(
         spawner,
-        state_machine::handle(),
+        hardware::handle(),
         alarm::handle(),
         display::handle(),
         ota::handle(),
@@ -199,7 +196,7 @@ async fn core1_main(
     button::spawn(
         spawner,
         button_pinning.display_toggle,
-        Duration::from_millis(TOGGLE_DEBOUNCE_MS),
+        Duration::from_millis(20),
         ButtonId::DisplayToggle,
         input::handle(),
     );

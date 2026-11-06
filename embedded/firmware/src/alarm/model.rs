@@ -215,15 +215,21 @@ impl Alarm {
         }
     }
 
-    /// Computes the number of seconds untill the alarm should trigger, this is the time minus the length of the alarm. Returns None if alarm is invalid
+    /// Seconds until the alarm next triggers, rounded up
     pub fn time_to_next_trigger(&self, now: OffsetDateTime) -> Result<u32, AlarmError> {
+        Ok(secs_until(self.next_trigger(now)? - now))
+    }
+
+    /// When the alarm next triggers after `now`: its time minus its length. Errors if the alarm
+    /// is invalid.
+    pub fn next_trigger(&self, now: OffsetDateTime) -> Result<OffsetDateTime, AlarmError> {
         match self.recurrence.recurrence_type {
             RecurrenceType::Daily => {
                 let next_time = now.replace_time(self.time) - Duration::minutes(self.length as i64);
                 if next_time > now {
-                    Ok((next_time - now).whole_seconds() as u32)
+                    Ok(next_time)
                 } else {
-                    Ok((next_time - now).whole_seconds() as u32 + 24 * 3600) // next day
+                    Ok(next_time + Duration::days(1)) // next day
                 }
             }
             RecurrenceType::Weekly => {
@@ -232,9 +238,10 @@ impl Alarm {
                     now.replace_time(self.time) - Duration::minutes(self.length as i64);
                 if let Some(mut days) = self.recurrence.days {
                     days.rotate_left(today as usize);
-                    for &day in days.iter() {
+                    // 8 days, so today's weekday next week counts once today's trigger has passed
+                    for &day in days.iter().cycle().take(8) {
                         if day && next_time > now {
-                            return Ok((next_time - now).whole_seconds() as u32);
+                            return Ok(next_time);
                         }
                         next_time += time::Duration::days(1);
                     }
@@ -248,7 +255,7 @@ impl Alarm {
                         let next_time = date.with_time(self.time).assume_offset(UtcOffset::UTC)
                             - Duration::minutes(self.length as i64);
                         if next_time > now {
-                            return Ok((next_time - now).whole_seconds() as u32);
+                            return Ok(next_time);
                         }
                     }
                 }
@@ -256,4 +263,14 @@ impl Alarm {
             }
         }
     }
+}
+
+/// Rounds up, so the scheduler never wakes before the trigger and sees it still ahead
+fn secs_until(duration: Duration) -> u32 {
+    let secs = duration.whole_seconds();
+    (if duration.subsec_nanoseconds() > 0 {
+        secs + 1
+    } else {
+        secs
+    }) as u32
 }

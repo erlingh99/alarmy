@@ -2,16 +2,17 @@ use core::cell::RefCell;
 
 use embassy_boot_rp::{AlignedBuffer, BlockingFirmwareUpdater, FirmwareUpdaterConfig, State};
 use embassy_executor::Spawner;
+use embassy_rp::Peri;
 use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::gpio::{AnyPin, Level, Output};
 use embassy_rp::peripherals::FLASH;
-use embassy_rp::Peri;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use serde::Deserialize;
 
 use crate::config::api_config::FIRMWARE_BINARY_ROUTE;
+use crate::health::{self, Fault};
 use crate::mailbox::{Mailbox, MailboxReceiver, MailboxSender};
 use crate::net::{HttpClient, NetworkError};
 use crate::supervisor::{crash, watchdog};
@@ -21,22 +22,19 @@ use super::record::{self, Version};
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const BOOT_CONFIRM_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
-// RP2040 flash write alignment — pad partial final chunks to this boundary.
+// RP2040 flash write alignment, pad partial final chunks to this boundary.
 const WRITE_SIZE: usize = 256;
 
-const fn parse_u32(s: &[u8]) -> u32 {
-    let mut val: u32 = 0;
-    let mut i = 0;
-    while i < s.len() {
-        val = val * 10 + (s[i] - b'0') as u32;
-        i += 1;
+const fn parse_u32(s: &str) -> u32 {
+    match u32::from_str_radix(s, 10) {
+        Ok(v) => v,
+        Err(_) => panic!("invalid version component"),
     }
-    val
 }
 
-const CURRENT_MAJOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MAJOR").as_bytes());
-const CURRENT_MINOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MINOR").as_bytes());
-const CURRENT_PATCH: u32 = parse_u32(env!("CARGO_PKG_VERSION_PATCH").as_bytes());
+const CURRENT_MAJOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MAJOR"));
+const CURRENT_MINOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MINOR"));
+const CURRENT_PATCH: u32 = parse_u32(env!("CARGO_PKG_VERSION_PATCH"));
 
 #[derive(Debug)]
 pub enum OtaError {
@@ -300,8 +298,11 @@ impl OtaActor {
             log::info!("OTA: Checking for firmware update");
             self.download_pin.set_high();
             match self.run_update(http_client).await {
-                Ok(()) => log::info!("OTA: Firmware is up to date"),
-                Err(e) => log::error!("OTA: Update failed: {:?}", e),
+                Ok(()) => {
+                    log::info!("OTA: Firmware is up to date");
+                    health::clear(Fault::Ota);
+                }
+                Err(e) => health::report(Fault::Ota, e),
             }
             self.download_pin.set_low();
             match self.mailbox.receive().await {

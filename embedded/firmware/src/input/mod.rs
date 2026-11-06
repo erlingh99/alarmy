@@ -1,3 +1,3 @@
 mod actor;
 
-pub use actor::{handle, spawn, ButtonId, InputHandle, RemoteCommand};
+pub use actor::{ButtonId, InputHandle, RemoteCommand, handle, spawn};

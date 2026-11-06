@@ -1,12 +1,12 @@
 use core::fmt::Write;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
+use embassy_rp::Peri;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
-use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver};
+use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config};
@@ -15,13 +15,16 @@ use log::{Level, Log, Metadata, Record};
 
 use super::TruncatingWriter;
 
-const LINE_LEN: usize = 256;
-const LOG_LINE_CAPACITY: usize = 8;
+pub(super) const LINE_LEN: usize = 256;
+pub(super) const LOG_LINE_CAPACITY: usize = 8;
 const MAX_PACKET_SIZE: u8 = 64;
 
 /// The oldest line is dropped when full
-static HTTP_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY> =
-    Channel::new();
+pub(super) static HTTP_LOG_CHANNEL: Channel<
+    CriticalSectionRawMutex,
+    String<LINE_LEN>,
+    LOG_LINE_CAPACITY,
+> = Channel::new();
 /// Held until a terminal sets DTR, the oldest lines are dropped when full
 static USB_LOG_CHANNEL: Channel<CriticalSectionRawMutex, String<LINE_LEN>, LOG_LINE_CAPACITY> =
     Channel::new();
@@ -63,18 +66,6 @@ fn push_line(
     });
 }
 
-/// Spawn on a thread mode executor: its wakes (`sev`) reach both cores, so core1 can log
-pub async fn spawn(
-    spawner: Spawner,
-    pinning: LoggingPinning,
-) -> Receiver<'static, CriticalSectionRawMutex, String<LINE_LEN>, 8> {
-    spawner.spawn(usb_log_task(pinning, &LOGGER_REGISTERED).unwrap());
-    // Wait until usb_log_task has registered the logger via set_logger_racy before returning,
-    // so callers can safely use log! macros immediately after this function resolves.
-    LOGGER_REGISTERED.wait().await;
-    HTTP_LOG_CHANNEL.receiver()
-}
-
 struct MultiLogger;
 
 impl Log for MultiLogger {
@@ -92,6 +83,14 @@ impl Log for MultiLogger {
     }
 
     fn flush(&self) {}
+}
+
+/// Spawn on a thread mode executor: its wakes (`sev`) reach both cores, so core1 can log
+pub async fn spawn(spawner: Spawner, pinning: LoggingPinning) {
+    spawner.spawn(usb_log_task(pinning, &LOGGER_REGISTERED).unwrap());
+    // Wait until usb_log_task has registered the logger via set_logger_racy before returning,
+    // so callers can safely use log! macros immediately after this function resolves.
+    LOGGER_REGISTERED.wait().await;
 }
 
 #[embassy_executor::task]

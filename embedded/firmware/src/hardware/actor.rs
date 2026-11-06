@@ -1,103 +1,91 @@
-use crate::alarm::model::Alarm;
-use crate::buzzer::{BuzzerDriver, BuzzerError};
-use crate::display::{DisplayError, DisplayHandle};
-use crate::led::{LedDriver, LedError};
-use crate::mailbox::{Mailbox, MailboxReceiver, MailboxSender, ReplyTo, Responder};
+use core::pin::pin;
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::{Receiver, Watch};
-use embassy_time::{with_timeout, Duration};
+use embassy_time::{Duration, Instant};
 use smart_leds::RGB8;
 
-const LOCK_TIMEOUT: Duration = Duration::from_millis(100);
+use crate::alarm::model::Alarm;
+use crate::buzzer::BuzzerDriver;
+use crate::led::LedDriver;
+use crate::mailbox::{Mailbox, MailboxReceiver, MailboxSender};
 
-static HW_STATE: Mutex<CriticalSectionRawMutex, HardwareState> = Mutex::new(HardwareState::Idle);
+/// The display
+const SUBSCRIBERS: usize = 1;
+static STATE: Watch<CriticalSectionRawMutex, HardwareState, SUBSCRIBERS> = Watch::new();
 
-/// Number of independent subscribers to [`HW_CHANGED`]: core1's display actor. Raise this when
-/// adding another subscriber.
-const HW_CHANGED_CONSUMERS: usize = 1;
-static HW_CHANGED: Watch<CriticalSectionRawMutex, (), HW_CHANGED_CONSUMERS> = Watch::new();
-pub type HwChangedReceiver = Receiver<'static, CriticalSectionRawMutex, (), HW_CHANGED_CONSUMERS>;
-
-/// Subscribes to `HW_STATE` changes.
-pub fn hw_changed_receiver() -> HwChangedReceiver {
-    HW_CHANGED
+/// Receives every new hardware state
+pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, HardwareState, SUBSCRIBERS> {
+    STATE
         .receiver()
-        .expect("more HW_CHANGED subscribers than HW_CHANGED_CONSUMERS allows")
+        .expect("more hardware state subscribers than SUBSCRIBERS allows")
 }
 
 static MAILBOX: Mailbox<HardwareMsg> = Mailbox::new();
-static SELF_TEST_REPLY: ReplyTo<Result<(), HardwareError>> = ReplyTo::new();
-static ALARM_REPLY: ReplyTo<Result<(), HardwareError>> = ReplyTo::new();
-
-/// Answered when the requested state has run to completion
-type Done = Responder<Result<(), HardwareError>>;
 
 #[derive(Debug)]
 enum HardwareMsg {
-    SelfTest {
-        respond_to: Done,
-    },
-    PlayAlarm {
-        alarm: Alarm,
-        elapsed_secs: u32,
-        respond_to: Done,
-    },
+    Request(Program),
+}
+
+/// What the hardware is playing, as published to subscribers
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HardwareState {
+    Init,
     Idle,
-    Color(RGB8),
+    Alarm,
+    Color,
     Fire,
     Rainbow,
+}
+
+impl HardwareState {
+    pub fn label(self) -> &'static str {
+        match self {
+            HardwareState::Init => "Init...",
+            HardwareState::Idle => "Idle",
+            HardwareState::Alarm => "Alarm",
+            HardwareState::Color => "Color",
+            HardwareState::Fire => "Fire",
+            HardwareState::Rainbow => "Rainbow",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum HardwareError {
-    Led(LedError),
-    Buzzer,
-    Display(DisplayError),
-    LockTimeout,
-    /// The hardware actor's mailbox was full
-    Unavailable,
-    /// The hardware didn't answer in time
-    Timeout,
-}
-
-impl From<LedError> for HardwareError {
-    fn from(e: LedError) -> Self {
-        HardwareError::Led(e)
-    }
-}
-
-impl From<BuzzerError> for HardwareError {
-    fn from(_: BuzzerError) -> Self {
-        HardwareError::Buzzer
-    }
-}
-
-impl From<DisplayError> for HardwareError {
-    fn from(e: DisplayError) -> Self {
-        HardwareError::Display(e)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum HardwareState {
-    Initialize,
-    Alarm((Alarm, u32)),
+enum Program {
+    /// Runs the LEDs and buzzer once at boot
+    Init,
+    Idle,
+    /// Played from `started_at`, so a restart resumes where it was
+    Alarm(Alarm, Instant),
     Color(RGB8),
     Fire,
     Rainbow,
-    Idle,
-    /// The error itself goes to the requester and the log
-    Error,
 }
 
-enum StateTransition {
-    To(HardwareState),
-    Stay,
+impl Program {
+    fn state(&self) -> HardwareState {
+        match self {
+            Program::Init => HardwareState::Init,
+            Program::Idle => HardwareState::Idle,
+            Program::Alarm(..) => HardwareState::Alarm,
+            Program::Color(_) => HardwareState::Color,
+            Program::Fire => HardwareState::Fire,
+            Program::Rainbow => HardwareState::Rainbow,
+        }
+    }
+
+    /// The same alarm asked for again, from a different start, keeps playing
+    fn is_same(&self, other: &Program) -> bool {
+        match (self, other) {
+            (Program::Alarm(a, _), Program::Alarm(b, _)) => a == b,
+            _ => self == other,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -112,224 +100,132 @@ pub fn handle() -> HardwareHandle {
 }
 
 impl HardwareHandle {
-    /// Tests the LEDs, buzzer and display, resolving once they are done
-    pub async fn self_test(&self) -> Result<(), HardwareError> {
-        self.mailbox
-            .request(&SELF_TEST_REPLY, |respond_to| HardwareMsg::SelfTest {
-                respond_to,
-            })
-            .await
-            .map_err(|_| HardwareError::Unavailable)?
-    }
-
-    /// Resolves when the alarm has finished playing. Never resolves if another command
-    /// replaces the alarm first.
-    pub async fn play_alarm(&self, alarm: Alarm, elapsed_secs: u32) -> Result<(), HardwareError> {
-        self.mailbox
-            .request(&ALARM_REPLY, |respond_to| HardwareMsg::PlayAlarm {
-                alarm,
-                elapsed_secs,
-                respond_to,
-            })
-            .await
-            .map_err(|_| HardwareError::Unavailable)?
-    }
-
     pub fn idle(&self) {
-        self.mailbox.post_or_warn(HardwareMsg::Idle);
+        self.request(Program::Idle);
     }
 
     pub fn color(&self, color: RGB8) {
-        self.mailbox.post_or_warn(HardwareMsg::Color(color));
+        self.request(Program::Color(color));
     }
 
     pub fn fire(&self) {
-        self.mailbox.post_or_warn(HardwareMsg::Fire);
+        self.request(Program::Fire);
     }
 
     pub fn rainbow(&self) {
-        self.mailbox.post_or_warn(HardwareMsg::Rainbow);
+        self.request(Program::Rainbow);
+    }
+
+    /// `elapsed_secs` is how far into the alarm we already are, when resuming one
+    pub fn start_alarm(&self, alarm: Alarm, elapsed_secs: u32) {
+        let started_at = Instant::now() - Duration::from_secs(elapsed_secs as u64);
+        self.request(Program::Alarm(alarm, started_at));
+    }
+
+    fn request(&self, program: Program) {
+        self.mailbox.post_or_warn(HardwareMsg::Request(program));
     }
 }
 
+/// Drives the LEDs and buzzer for the requested state
 struct HardwareActor {
     led_driver: LedDriver,
     buzzer_driver: BuzzerDriver,
-    display: DisplayHandle,
     mailbox: MailboxReceiver<HardwareMsg>,
-    state: HardwareState,
-    /// The requester waiting for the current state to finish, if any
-    respond_to: Option<Done>,
-}
-
-pub async fn lock_hw_state() -> Result<HardwareState, HardwareError> {
-    with_timeout(LOCK_TIMEOUT, HW_STATE.lock())
-        .await
-        .map(|guard| guard.clone())
-        .map_err(|_| HardwareError::LockTimeout)
-}
-
-pub fn spawn(
-    spawner: Spawner,
-    led_driver: LedDriver,
-    buzzer_driver: BuzzerDriver,
-    display: DisplayHandle,
-) {
-    let actor = HardwareActor {
-        led_driver,
-        buzzer_driver,
-        display,
-        mailbox: MAILBOX.receiver(),
-        state: HardwareState::Idle,
-        respond_to: None,
-    };
-    spawner.spawn(hardware_task(actor).unwrap());
+    program: Program,
 }
 
 impl HardwareActor {
-    /// Main loop.
-    ///
-    /// # Cancellation contract
-    ///
-    /// Every state handler (`handle_alarm`, `handle_fire`, `handle_rainbow`, …) runs as one
-    /// branch of `select(handler_future, mailbox.receive())`. When a message arrives, the losing
-    /// branch (the current handler) is **dropped** at its next `.await` point — within ≤50 ms for
-    /// `fire`, ≤20 ms for `rainbow`, and at note-boundary granularity for `alarm` melody. The
-    /// dropped handler's requester gets no answer.
     async fn run(&mut self) -> ! {
         loop {
-            self.publish_state().await;
-            let next_state = match select(self.run_state(), self.mailbox.receive()).await {
-                Either::First(Ok(StateTransition::To(state))) => {
-                    self.respond(Ok(()));
-                    state
+            STATE.sender().send(self.program.state());
+            let next = self.play_until_new().await;
+            log::info!(
+                "Hardware: {} -> {}",
+                self.program.state().label(),
+                next.state().label()
+            );
+            self.program = next;
+        }
+    }
+
+    /// Plays the current program until it finishes or a request replaces it. A request for the
+    /// current program leaves it playing undisturbed.
+    async fn play_until_new(&mut self) -> Program {
+        let mut playing = pin!(play(
+            &mut self.led_driver,
+            &mut self.buzzer_driver,
+            &self.program
+        ));
+        loop {
+            match select(&mut playing, self.mailbox.receive()).await {
+                Either::First(()) => return Program::Idle,
+                Either::Second(HardwareMsg::Request(next)) if !next.is_same(&self.program) => {
+                    if let Program::Alarm(alarm, _) = &self.program {
+                        log::info!("Alarm '{}' cancelled", alarm.name);
+                    }
+                    return next;
                 }
-                Either::First(Ok(StateTransition::Stay)) => {
-                    let msg = self.mailbox.receive().await;
-                    self.handle_message(msg)
-                }
-                Either::First(Err(e)) => {
-                    log::error!("Hardware operation failed: {e:?}");
-                    self.respond(Err(e));
-                    HardwareState::Error
-                }
-                Either::Second(msg) => self.handle_message(msg),
-            };
-            self.state = next_state;
-        }
-    }
-
-    fn handle_message(&mut self, msg: HardwareMsg) -> HardwareState {
-        self.respond_to = None;
-        match msg {
-            HardwareMsg::SelfTest { respond_to } => {
-                self.respond_to = Some(respond_to);
-                HardwareState::Initialize
+                Either::Second(_) => {}
             }
-            HardwareMsg::PlayAlarm {
-                alarm,
-                elapsed_secs,
-                respond_to,
-            } => {
-                self.respond_to = Some(respond_to);
-                HardwareState::Alarm((alarm, elapsed_secs))
-            }
-            HardwareMsg::Idle => HardwareState::Idle,
-            HardwareMsg::Color(color) => HardwareState::Color(color),
-            HardwareMsg::Fire => HardwareState::Fire,
-            HardwareMsg::Rainbow => HardwareState::Rainbow,
         }
     }
+}
 
-    fn respond(&mut self, result: Result<(), HardwareError>) {
-        if let Some(respond_to) = self.respond_to.take() {
-            respond_to.send(result);
+/// Returns once a program with an end has finished; the others play until dropped
+async fn play(led: &mut LedDriver, buzzer: &mut BuzzerDriver, program: &Program) {
+    match program {
+        Program::Init => {
+            log::info!("Testing LED driver...");
+            led.run_wheel_once().await;
+            log::info!("Testing BUZZER driver...");
+            buzzer.play_short_melody().await;
+            log::info!("All OK");
         }
-    }
-
-    async fn run_state(&self) -> Result<StateTransition, HardwareError> {
-        match &self.state {
-            HardwareState::Alarm((alarm, elapsed_secs)) => {
-                self.handle_alarm(alarm, *elapsed_secs).await
-            }
-            HardwareState::Initialize => self.handle_initialize().await,
-            HardwareState::Color(color) => self.handle_color(*color).await,
-            HardwareState::Fire => self.handle_fire().await,
-            HardwareState::Rainbow => self.handle_rainbow().await,
-            HardwareState::Idle => self.handle_idle().await,
-            HardwareState::Error => Ok(StateTransition::Stay),
-        }
-    }
-
-    /// Lets the display show the current state
-    async fn publish_state(&self) {
-        if let Ok(mut guard) = with_timeout(LOCK_TIMEOUT, HW_STATE.lock()).await {
-            *guard = self.state.clone();
-            HW_CHANGED.sender().send(());
-        }
-    }
-
-    async fn handle_alarm(
-        &self,
-        alarm: &Alarm,
-        elapsed_secs: u32,
-    ) -> Result<StateTransition, HardwareError> {
-        self.led_driver
-            .follow_intensity_curve(
+        Program::Alarm(alarm, started_at) => {
+            buzzer.off();
+            let elapsed_secs = started_at.elapsed().as_secs() as u32;
+            led.follow_intensity_curve(
                 &alarm.color,
                 &alarm.intensity_curve,
                 alarm.length,
                 elapsed_secs,
             )
-            .await?;
-        if alarm.play_melody {
-            let (led_res, buzzer_res) = join(
-                self.led_driver.blink(&alarm.color),
-                self.buzzer_driver.play_melody(),
-            )
             .await;
-            led_res?;
-            buzzer_res?;
-        } else {
-            self.led_driver.blink(&alarm.color).await?;
+            if alarm.play_melody {
+                join(led.blink(&alarm.color), buzzer.play_melody()).await;
+            } else {
+                led.blink(&alarm.color).await;
+            }
+            log::info!("Alarm '{}' completed", alarm.name);
         }
-        Ok(StateTransition::To(HardwareState::Idle))
+        Program::Idle => {
+            buzzer.off();
+            led.color(RGB8::default()).await
+        }
+        Program::Color(color) => {
+            buzzer.off();
+            led.color(*color).await
+        }
+        Program::Fire => {
+            buzzer.off();
+            led.fire().await
+        }
+        Program::Rainbow => {
+            buzzer.off();
+            led.rainbow().await
+        }
     }
+}
 
-    async fn handle_initialize(&self) -> Result<StateTransition, HardwareError> {
-        log::info!("Testing LED driver...");
-        self.led_driver.run_wheel_once().await?;
-        log::info!("Testing BUZZER driver...");
-        self.buzzer_driver.play_short_melody().await?;
-        log::info!("Testing DISPLAY driver...");
-        self.display.self_test().await?;
-        log::info!("All OK");
-        Ok(StateTransition::To(HardwareState::Idle))
-    }
-
-    async fn handle_color(&self, color: RGB8) -> Result<StateTransition, HardwareError> {
-        self.buzzer_driver.off()?;
-        self.led_driver.color(color).await?;
-        Ok(StateTransition::Stay)
-    }
-
-    async fn handle_fire(&self) -> Result<StateTransition, HardwareError> {
-        self.buzzer_driver.off()?;
-        self.led_driver.fire().await?;
-        Ok(StateTransition::To(HardwareState::Idle))
-    }
-
-    async fn handle_rainbow(&self) -> Result<StateTransition, HardwareError> {
-        self.buzzer_driver.off()?;
-        self.led_driver.rainbow().await?;
-        Ok(StateTransition::To(HardwareState::Idle))
-    }
-
-    async fn handle_idle(&self) -> Result<StateTransition, HardwareError> {
-        self.led_driver.off().await?;
-        self.buzzer_driver.off()?;
-        Ok(StateTransition::Stay)
-    }
+pub fn spawn(spawner: Spawner, led_driver: LedDriver, buzzer_driver: BuzzerDriver) {
+    let actor = HardwareActor {
+        led_driver,
+        buzzer_driver,
+        mailbox: MAILBOX.receiver(),
+        program: Program::Init,
+    };
+    spawner.spawn(hardware_task(actor).unwrap());
 }
 
 #[embassy_executor::task]

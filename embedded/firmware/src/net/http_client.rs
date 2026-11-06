@@ -1,6 +1,6 @@
+use embassy_net::Stack;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::{TcpClient, TcpClientState};
-use embassy_net::Stack;
 use embassy_rp::clocks::RoscRng;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
@@ -224,7 +224,7 @@ impl HttpClient {
             })?;
         match health {
             HealthStatus::Ok => Ok(()),
-            _ => Err(NetworkError::BackendDown),
+            HealthStatus::NotOk => Err(NetworkError::BackendDown),
         }
     }
 

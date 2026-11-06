@@ -1,14 +1,14 @@
 use core::fmt::Write as _;
 
+use embassy_rp::Peri;
 use embassy_rp::i2c::{Async as I2cAsyncMode, Config as I2cConfig, I2c};
 use embassy_rp::peripherals::{I2C1, PIN_26, PIN_27};
-use embassy_rp::Peri;
 use embassy_time::Timer;
-use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10};
 use embedded_graphics::mono_font::MonoTextStyle;
+use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_10X20};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle};
+use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle, Triangle};
 use embedded_graphics::text::{Baseline, Text};
 use heapless::String;
 use ssd1306::mode::{BufferedGraphicsModeAsync, DisplayConfigAsync};
@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 
 use crate::config::display_config::I2C_ADDRESS;
 use crate::hardware::HardwareState;
+use crate::health::Faults;
 use crate::interrupts::Irqs;
 
 type Display = Ssd1306Async<
@@ -30,8 +31,8 @@ type Display = Ssd1306Async<
 pub enum DisplayError {
     InitFailed,
     I2cError,
-    /// The display actor's mailbox was full
-    Unavailable,
+    /// The init didn't finish in time
+    Timeout,
 }
 
 pub struct DisplayPinning {
@@ -46,17 +47,8 @@ pub(super) struct DisplayInfo {
     pub(super) next_alarm: Option<(String<32>, time::Time)>,
     pub(super) wifi_connected: bool,
     pub(super) alarms_enabled: bool,
-}
-
-impl DisplayInfo {
-    pub(super) const fn new() -> Self {
-        DisplayInfo {
-            time: None,
-            next_alarm: None,
-            wifi_connected: false,
-            alarms_enabled: true,
-        }
-    }
+    pub(super) hw_state: HardwareState,
+    pub(super) faults: Faults,
 }
 
 pub(super) struct DisplayDriver {
@@ -79,7 +71,7 @@ impl DisplayDriver {
         DisplayDriver { display }
     }
 
-    pub(super) async fn self_test(&mut self) -> Result<(), DisplayError> {
+    pub(super) async fn init(&mut self) -> Result<(), DisplayError> {
         self.display
             .init()
             .await
@@ -99,11 +91,7 @@ impl DisplayDriver {
         Ok(())
     }
 
-    pub(super) async fn render(
-        &mut self,
-        info: &DisplayInfo,
-        hw_state: &HardwareState,
-    ) -> Result<(), DisplayError> {
+    pub(super) async fn render(&mut self, info: &DisplayInfo) -> Result<(), DisplayError> {
         self.display.clear(BinaryColor::Off).unwrap();
 
         let big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
@@ -118,6 +106,9 @@ impl DisplayDriver {
         .draw(&mut self.display)
         .unwrap();
         draw_bell_icon(&mut self.display, info.alarms_enabled);
+        if info.faults.any() {
+            draw_warning_icon(&mut self.display);
+        }
         if info.alarms_enabled {
             Text::with_baseline(
                 &format_next_alarm(&info.next_alarm),
@@ -129,11 +120,7 @@ impl DisplayDriver {
             .unwrap();
         }
         Text::with_baseline(
-            if info.wifi_connected {
-                "WiFi: OK"
-            } else {
-                "WiFi: --"
-            },
+            &format_health(info.wifi_connected, info.faults),
             Point::new(0, 36),
             small,
             Baseline::Top,
@@ -141,7 +128,7 @@ impl DisplayDriver {
         .draw(&mut self.display)
         .unwrap();
         Text::with_baseline(
-            &format_status(hw_state),
+            &format_status(info.hw_state),
             Point::new(0, 50),
             small,
             Baseline::Top,
@@ -193,16 +180,30 @@ fn format_next_alarm(next_alarm: &Option<(String<32>, time::Time)>) -> String<32
     s
 }
 
-fn format_status(state: &HardwareState) -> String<24> {
-    let label = match state {
-        HardwareState::Initialize => "Init...",
-        HardwareState::Idle => "Idle",
-        HardwareState::Alarm(_) => "Alarm",
-        HardwareState::Color(_) => "Color",
-        HardwareState::Fire => "Fire",
-        HardwareState::Rainbow => "Rainbow",
-        HardwareState::Error => "Error",
-    };
+/// The first active fault, else the WiFi status
+fn format_health(wifi_connected: bool, faults: Faults) -> String<24> {
+    let mut s = String::new();
+    let mut active = faults.iter();
+    match active.next() {
+        Some(fault) => {
+            let _ = write!(s, "! {}", fault.label());
+            let more = active.count();
+            if more > 0 {
+                let _ = write!(s, " +{more}");
+            }
+        }
+        None if wifi_connected => {
+            let _ = write!(s, "WiFi: OK");
+        }
+        None => {
+            let _ = write!(s, "WiFi: --");
+        }
+    }
+    s
+}
+
+fn format_status(state: HardwareState) -> String<24> {
+    let label = state.label();
     let mut s = String::new();
     let _ = write!(s, "State: {label}");
     s
@@ -232,4 +233,23 @@ fn draw_bell_icon(display: &mut Display, enabled: bool) {
             .draw(&mut *display)
             .unwrap();
     }
+}
+
+/// A filled triangle with a cut out "!", left of the bell
+fn draw_warning_icon(display: &mut Display) {
+    let fill_on = PrimitiveStyle::with_fill(BinaryColor::On);
+    let stroke_off = PrimitiveStyle::with_stroke(BinaryColor::Off, 1);
+
+    Triangle::new(Point::new(104, 1), Point::new(97, 14), Point::new(111, 14))
+        .into_styled(fill_on)
+        .draw(&mut *display)
+        .unwrap();
+    Line::new(Point::new(104, 5), Point::new(104, 9))
+        .into_styled(stroke_off)
+        .draw(&mut *display)
+        .unwrap();
+    Line::new(Point::new(104, 11), Point::new(104, 12))
+        .into_styled(stroke_off)
+        .draw(&mut *display)
+        .unwrap();
 }

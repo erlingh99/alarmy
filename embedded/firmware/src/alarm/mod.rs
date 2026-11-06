@@ -1,4 +1,4 @@
 pub mod model;
 mod scheduler;
 
-pub use scheduler::{handle, spawn, AlarmError, AlarmHandle, AlarmScheduler};
+pub use scheduler::{AlarmHandle, AlarmStatus, handle, spawn, subscribe};

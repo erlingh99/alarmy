@@ -1,30 +1,39 @@
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, Either3, select, select3};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal};
-
-use embassy_time::Timer;
-use heapless::Vec;
-use portable_atomic::{AtomicBool, Ordering};
-use static_cell::StaticCell;
+use embassy_futures::select::{Either4, select4};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::watch::{Receiver, Watch};
+use embassy_time::{Duration, Instant, Timer};
+use heapless::{String, Vec};
+use time::{OffsetDateTime, Time};
 
 use crate::alarm::model::Alarm;
-use crate::config::api_config::{API_POLLING_INTERVAL_S, API_RETRY_S};
+use crate::config::api_config::API_POLLING_INTERVAL_S;
+use crate::hardware::HardwareHandle;
+use crate::health::{self, Backoff, Fault};
 use crate::mailbox::{Mailbox, MailboxReceiver, MailboxSender};
 use crate::net::HttpClient;
-use crate::state_machine::StateHandle;
-use crate::time_lib::Clock;
+use crate::time_lib::{self, TimeSync};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum AlarmError {
-    AlarmListFull,
-    AlarmListEmpty,
-    AlarmListLocked,
-    TimeError,
-    NoComingAlarm,
+const MAX_ALARMS: usize = 4;
+
+static MAILBOX: Mailbox<AlarmMsg> = Mailbox::new();
+
+/// The display
+const SUBSCRIBERS: usize = 1;
+static STATUS: Watch<CriticalSectionRawMutex, AlarmStatus, SUBSCRIBERS> = Watch::new();
+
+pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, AlarmStatus, SUBSCRIBERS> {
+    STATUS
+        .receiver()
+        .expect("more alarm status subscribers than SUBSCRIBERS allows")
 }
 
-static ALARM_SCHEDULER: StaticCell<AlarmScheduler> = StaticCell::new();
-static MAILBOX: Mailbox<AlarmMsg> = Mailbox::new();
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlarmStatus {
+    pub enabled: bool,
+    /// Name and time of the alarm that triggers next
+    pub next: Option<(String<32>, Time)>,
+}
 
 #[derive(Debug)]
 enum AlarmMsg {
@@ -43,264 +52,183 @@ pub fn handle() -> AlarmHandle {
 }
 
 impl AlarmHandle {
-    /// Fetch the alarms from the backend now instead of at the next poll
+    /// Fetch the alarms from the backend now
     pub fn refresh(&self) {
         self.mailbox.post_or_warn(AlarmMsg::Refresh);
     }
 }
 
-pub struct AlarmScheduler {
-    alarms: Mutex<CriticalSectionRawMutex, Vec<Alarm, 4>>,
-    new_alarms: Signal<CriticalSectionRawMutex, ()>,
+/// Fetches the alarms from the backend and hands each one to the state machine when it is due
+struct AlarmScheduler {
     mailbox: MailboxReceiver<AlarmMsg>,
     http_client: &'static HttpClient,
-    clock: &'static Clock,
-    state: StateHandle,
-    enabled: AtomicBool,
-    /// Signalled whenever `enabled` changes so wait_for_enabled/disabled wake immediately.
-    enabled_changed: Signal<CriticalSectionRawMutex, ()>,
-}
-
-pub fn spawn(
-    spawner: Spawner,
-    http_client: &'static HttpClient,
-    clock: &'static Clock,
-    state: StateHandle,
-) -> &'static AlarmScheduler {
-    let scheduler = ALARM_SCHEDULER.init(AlarmScheduler {
-        alarms: Mutex::new(Vec::new()),
-        new_alarms: Signal::new(),
-        mailbox: MAILBOX.receiver(),
-        http_client,
-        clock,
-        state,
-        enabled: AtomicBool::new(true),
-        enabled_changed: Signal::new(),
-    });
-
-    spawner.spawn(alarm_fetch_task(scheduler).unwrap());
-    spawner.spawn(alarm_task(scheduler).unwrap());
-    scheduler
+    hardware: HardwareHandle,
+    alarms: Vec<Alarm, MAX_ALARMS>,
+    /// None until the first fetch
+    enabled: Option<bool>,
+    next_fetch: Instant,
+    fetch_backoff: Backoff,
 }
 
 impl AlarmScheduler {
-    pub fn enable(&self) {
-        self.enabled.store(true, Ordering::Relaxed);
-        self.enabled_changed.signal(());
-    }
-
-    pub fn disable(&self) {
-        self.enabled.store(false, Ordering::Relaxed);
-        self.enabled_changed.signal(());
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
-    }
-
-    async fn wait_for_enabled(&self) {
+    async fn run(&mut self) -> ! {
+        log::info!("Starting alarm scheduler");
+        let mut time = time_lib::subscribe();
+        let mut sync = time.get().await;
         loop {
-            if self.enabled.load(Ordering::Relaxed) {
-                log::info!("Alarm scheduler enabled");
-                return;
+            let now = sync.utc_now();
+            let next = self.next_alarm(now);
+            self.publish_status(next.as_ref().map(|(alarm, _)| alarm));
+
+            let due = match &next {
+                Some((_, trigger)) if self.enabled == Some(true) => sync.instant_at(*trigger),
+                _ => Instant::MAX,
+            };
+            match select4(
+                self.mailbox.receive(),
+                Timer::at(self.next_fetch),
+                Timer::at(due),
+                time.changed(),
+            )
+            .await
+            {
+                Either4::First(AlarmMsg::Refresh) | Either4::Second(()) => {
+                    log::info!("Alarm fetch triggered");
+                    self.fetch(sync).await;
+                }
+                Either4::Third(()) => {}
+                Either4::Fourth(new_sync) => sync = new_sync,
             }
-            self.enabled_changed.wait().await;
+
+            // On the wall clock, so a resync or fetch that passed the trigger still fires it
+            if let Some((alarm, trigger)) = next
+                && self.enabled == Some(true)
+                && sync.utc_now() >= trigger
+            {
+                self.start_if_still_due(&alarm.id, trigger, sync.utc_now());
+            }
         }
     }
 
-    async fn wait_for_disabled(&self) {
-        loop {
-            if !self.enabled.load(Ordering::Relaxed) {
-                log::info!("Alarm scheduler disabled");
-                return;
+    /// Starts the stored copy of the alarm, unless a fetch since deleted, deactivated or moved it
+    fn start_if_still_due(&self, id: &str, trigger: OffsetDateTime, now: OffsetDateTime) {
+        let still_due = self.alarms.iter().find(|alarm| {
+            alarm.id == id
+                && alarm.next_trigger(trigger - time::Duration::SECOND).ok() == Some(trigger)
+        });
+        match still_due {
+            Some(alarm) => {
+                log::info!("Alarm '{}' due", alarm.name);
+                let elapsed = (now - trigger).whole_seconds().max(0) as u32;
+                self.hardware.start_alarm(alarm.clone(), elapsed);
             }
-            self.enabled_changed.wait().await;
+            None => log::info!("Alarm due, but changed since it was scheduled"),
         }
     }
 
-    async fn fetch_alarms(&self) -> u64 {
-        match self.http_client.get_alarm_sync().await {
+    async fn fetch(&mut self, time: TimeSync) {
+        let wait = match self.http_client.get_alarm_sync().await {
             Ok(sync) => {
                 log::info!("Alarms fetched succesfully");
-                if sync.alarms_enabled {
-                    self.enable();
-                } else {
-                    self.disable();
-                }
-                match self.handle_alarms(sync.alarms).await {
-                    Ok(_) => {
-                        log::info!("Alarms scheduled successfully");
-                        self.new_alarms.signal(());
-                        API_POLLING_INTERVAL_S
-                    }
-                    Err(err) => {
-                        log::error!("Failed to schedule alarms: {err:?}");
-                        API_RETRY_S
+                health::clear(Fault::AlarmFetch);
+                self.fetch_backoff.reset();
+                let now = time.utc_now();
+                self.store_alarms(sync.alarms, now);
+                if self.enabled != Some(sync.alarms_enabled) {
+                    log::info!("Alarms enabled: {}", sync.alarms_enabled);
+                    // On boot and when re-enabled, so an alarm already mid-sequence starts too
+                    if sync.alarms_enabled {
+                        self.resume_active_alarm(now);
                     }
                 }
+                self.enabled = Some(sync.alarms_enabled);
+                API_POLLING_INTERVAL_S
             }
             Err(err) => {
-                log::error!("Failed to fetch alarms: {err:?}");
-                API_RETRY_S
+                health::report(Fault::AlarmFetch, err);
+                self.fetch_backoff.next_delay_s()
             }
-        }
+        };
+        self.next_fetch = Instant::now() + Duration::from_secs(wait);
     }
 
-    async fn handle_alarms(&self, alarms: Vec<Alarm, 8>) -> Result<(), AlarmError> {
-        match select(self.alarms.lock(), Timer::after_secs(10)).await {
-            Either::First(mut alarm_guard) => {
-                alarm_guard.clear();
-
-                let now = self
-                    .clock
-                    .get_current_time()
-                    .await
-                    .map_err(|_e| AlarmError::TimeError)?;
-
-                for alarm in alarms {
-                    if !alarm.is_active {
-                        continue;
-                    }
-
-                    log::info!("Handling alarm {}", alarm.id);
-                    if !alarm_guard.is_full() {
-                        alarm_guard
-                            .push(alarm)
-                            .map_err(|_e| AlarmError::AlarmListFull)?; //this should never happen
-                        log::info!("Added new alarm");
-                    } else {
-                        // need to find the oldest alarm and replace it if this alarm is newer
-                        let (max_idx, max_val) = alarm_guard
-                            .iter()
-                            .map(|a| a.time_to_next_trigger(now).unwrap_or(u32::MAX))
-                            .enumerate()
-                            .max_by_key(|&(_idx, time)| time)
-                            .unwrap_or((0, u32::MAX));
-
-                        if alarm.time_to_next_trigger(now).unwrap_or(u32::MAX) < max_val {
-                            alarm_guard[max_idx] = alarm;
-                            log::info!("Replaced oldest alarm with new one");
-                        } else {
-                            log::warn!("Alarm list full, couldn't add new alarm");
-                        }
-                    }
-                }
-            }
-            Either::Second(_) => {
-                log::error!("Could not get lock on the ALARMS vec");
-                return Err(AlarmError::AlarmListLocked);
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn get_next_alarm(&self) -> Result<Alarm, AlarmError> {
-        let alarm_guard = self.alarms.lock().await;
-        if let Ok(now) = self.clock.get_current_time().await {
-            return Ok(alarm_guard
+    /// Keeps the active alarms that trigger soonest
+    fn store_alarms(&mut self, alarms: Vec<Alarm, 8>, now: OffsetDateTime) {
+        let secs_until = |alarm: &Alarm| alarm.time_to_next_trigger(now).unwrap_or(u32::MAX);
+        self.alarms.clear();
+        for alarm in alarms.into_iter().filter(|alarm| alarm.is_active) {
+            let Err(alarm) = self.alarms.push(alarm) else {
+                continue;
+            };
+            let (latest_idx, latest) = self
+                .alarms
                 .iter()
-                .min_by_key(|a| a.time_to_next_trigger(now).unwrap_or(u32::MAX))
-                .ok_or(AlarmError::AlarmListEmpty)?
-                .clone());
+                .map(secs_until)
+                .enumerate()
+                .max_by_key(|&(_, secs)| secs)
+                .unwrap_or((0, u32::MAX));
+            if secs_until(&alarm) < latest {
+                log::info!("Alarm list full, replaced the alarm triggering last");
+                self.alarms[latest_idx] = alarm;
+            } else {
+                log::warn!("Alarm list full, dropped '{}'", alarm.name);
+            }
         }
-        Err(AlarmError::NoComingAlarm)
+        log::info!("{} alarms scheduled", self.alarms.len());
     }
 
-    async fn get_active_alarm(&self) -> Option<(Alarm, u32)> {
-        let now = self.clock.get_current_time().await.ok()?;
-        let alarm_guard = self.alarms.lock().await;
-        alarm_guard.iter().find_map(|alarm| {
-            alarm
-                .elapsed_in_alarm(now)
-                .map(|elapsed| (alarm.clone(), elapsed))
-        })
+    /// The alarm triggering next, and when
+    fn next_alarm(&self, now: OffsetDateTime) -> Option<(Alarm, OffsetDateTime)> {
+        self.alarms
+            .iter()
+            .filter_map(|alarm| Some((alarm, alarm.next_trigger(now).ok()?)))
+            .min_by_key(|&(_, trigger)| trigger)
+            .map(|(alarm, trigger)| {
+                log::debug!("Next alarm '{}' at {trigger}", alarm.name);
+                (alarm.clone(), trigger)
+            })
     }
 
-    async fn run_fetch_loop(&self) -> ! {
-        log::info!("Starting alarm fetcher task");
-        let mut next_fetch = API_RETRY_S;
-        loop {
-            match select(Timer::after_secs(next_fetch), self.mailbox.receive()).await {
-                Either::First(_) => log::info!("Performing periodic alarm fetch"),
-                Either::Second(AlarmMsg::Refresh) => log::info!("Alarm fetch triggered"),
-            }
-            next_fetch = self.fetch_alarms().await;
+    fn resume_active_alarm(&self, now: OffsetDateTime) {
+        let active = self.alarms.iter().find_map(|alarm| {
+            let elapsed = alarm.elapsed_in_alarm(now)?;
+            Some((alarm.clone(), elapsed))
+        });
+        if let Some((alarm, elapsed)) = active {
+            log::info!("Resuming alarm '{}' at {}s elapsed", alarm.name, elapsed);
+            self.hardware.start_alarm(alarm, elapsed);
         }
     }
 
-    async fn run(&self) -> ! {
-        log::info!("Starting alarm scheduler task");
-
-        loop {
-            self.wait_for_enabled().await;
-
-            if let Some((alarm, elapsed)) = self.get_active_alarm().await {
-                log::info!("Resuming alarm '{}' at {}s elapsed", alarm.name, elapsed);
-                self.state.start_alarm(alarm, elapsed);
-            }
-
-            loop {
-                let next_alarm = match self.get_next_alarm().await {
-                    Ok(alarm) => {
-                        log::info!("Next alarm: '{}'", alarm.name);
-                        Some(alarm)
-                    }
-                    Err(e) => {
-                        log::warn!("No alarms available: {e:?}");
-                        None
-                    }
-                };
-
-                let time_to_next_alarm = if let Some(alarm) = &next_alarm {
-                    match self.clock.get_current_time().await {
-                        Ok(now) => alarm.time_to_next_trigger(now).ok(),
-                        Err(e) => {
-                            log::error!("Failed to get current time: {e:?}");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                log::debug!("Time to next alarm: {time_to_next_alarm:?} seconds");
-
-                let timeout = time_to_next_alarm.unwrap_or(8 * 3600).min(8 * 3600) as u64;
-
-                match select3(
-                    self.new_alarms.wait(),
-                    Timer::after_secs(timeout),
-                    self.wait_for_disabled(),
-                )
-                .await
-                {
-                    Either3::First(_) => {
-                        log::info!("Alarms updated, refreshing next alarm");
-                    }
-                    Either3::Second(_) => {
-                        if time_to_next_alarm.unwrap_or(u32::MAX) <= timeout as u32
-                            && let Some(alarm) = next_alarm
-                        {
-                            log::info!("Alarm '{}' due, handing off to state machine", alarm.name);
-                            self.state.start_alarm(alarm, 0);
-                        }
-                    }
-                    Either3::Third(_) => {
-                        log::info!("Alarm scheduler disabled");
-                        break; // Exit inner loop, go back to waiting for enable
-                    }
-                }
-            }
+    fn publish_status(&self, next: Option<&Alarm>) {
+        // enabled is None untill the first fetch
+        let Some(enabled) = self.enabled else {
+            return;
+        };
+        let status = AlarmStatus {
+            enabled,
+            next: next.map(|alarm| (alarm.name.clone(), alarm.time)),
+        };
+        if STATUS.try_get().as_ref() != Some(&status) {
+            STATUS.sender().send(status);
         }
     }
 }
 
-#[embassy_executor::task]
-async fn alarm_fetch_task(scheduler: &'static AlarmScheduler) -> ! {
-    scheduler.run_fetch_loop().await
+pub fn spawn(spawner: Spawner, http_client: &'static HttpClient, hardware: HardwareHandle) {
+    let scheduler = AlarmScheduler {
+        mailbox: MAILBOX.receiver(),
+        http_client,
+        hardware,
+        alarms: Vec::new(),
+        enabled: None,
+        next_fetch: Instant::now(),
+        fetch_backoff: Backoff::new(),
+    };
+    spawner.spawn(alarm_task(scheduler).unwrap());
 }
 
 #[embassy_executor::task]
-async fn alarm_task(scheduler: &'static AlarmScheduler) -> ! {
+async fn alarm_task(mut scheduler: AlarmScheduler) -> ! {
     scheduler.run().await
 }

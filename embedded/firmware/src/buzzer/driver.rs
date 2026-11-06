@@ -1,7 +1,5 @@
 use embassy_rp::pwm::{Config, Pwm, SetDutyCycle};
 use embassy_rp::{clocks, clocks::RoscRng};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 
 use crate::buzzer::notes::*;
@@ -11,29 +9,16 @@ pub struct BuzzerPinning {
     pub pwm: Pwm<'static>,
 }
 
-#[derive(Debug, Clone)]
-pub enum BuzzerError {
-    InvalidDutyCycle,
-    BuzzerRunning,
-}
-
 pub struct BuzzerDriver {
-    pwm: Mutex<CriticalSectionRawMutex, Pwm<'static>>,
+    pwm: Pwm<'static>,
 }
 
 impl BuzzerDriver {
     pub fn new(pinning: BuzzerPinning) -> Self {
-        BuzzerDriver {
-            pwm: Mutex::new(pinning.pwm),
-        }
+        BuzzerDriver { pwm: pinning.pwm }
     }
 
-    pub async fn play_melody(&self) -> Result<(), BuzzerError> {
-        let mut pwm = self
-            .pwm
-            .try_lock()
-            .map_err(|_| BuzzerError::BuzzerRunning)?;
-
+    pub async fn play_melody(&mut self) {
         // Define melody: (frequency in Hz, duration in ms)
         let idx = (RoscRng::next_u8() % 3) as usize;
 
@@ -49,26 +34,17 @@ impl BuzzerDriver {
         );
 
         for &(freq, dur_ms) in melody {
-            BuzzerDriver::play_tone(&mut pwm, freq, dur_ms)
-                .await
-                .map_err(|_| BuzzerError::InvalidDutyCycle)?;
+            self.play_tone(freq, dur_ms).await;
             Timer::after_millis((dur_ms as f32 * 0.2) as u64).await; // Short pause between notes
         }
-        pwm.set_duty_cycle_fully_off()
-            .map_err(|_| BuzzerError::InvalidDutyCycle)?;
-        Ok(())
+        self.off();
     }
 
-    async fn play_tone(
-        pwm: &mut Pwm<'_>,
-        frequency: u32,
-        duration_ms: u64,
-    ) -> Result<(), BuzzerError> {
+    async fn play_tone(&mut self, frequency: u32, duration_ms: u64) {
         if frequency == 0 {
-            pwm.set_duty_cycle_fully_off()
-                .map_err(|_| BuzzerError::InvalidDutyCycle)?;
+            self.off();
             Timer::after_millis(duration_ms).await;
-            return Ok(());
+            return;
         }
 
         let divider = 128u8;
@@ -76,16 +52,14 @@ impl BuzzerDriver {
         let mut config = Config::default();
         config.top = top as u16;
         config.divider = divider.into();
-        pwm.set_config(&config);
-        pwm.set_duty_cycle_percent(50)
-            .map_err(|_| BuzzerError::InvalidDutyCycle)?; // 50% duty cycle
+        self.pwm.set_config(&config);
+        // Only fails above the PWM's top, which no percentage reaches
+        let _ = self.pwm.set_duty_cycle_percent(50);
         Timer::after_millis(duration_ms).await;
-        pwm.set_duty_cycle_fully_off()
-            .map_err(|_| BuzzerError::InvalidDutyCycle)?; // Stop the sound
-        Ok(())
+        self.off();
     }
 
-    pub async fn play_short_melody(&self) -> Result<(), BuzzerError> {
+    pub async fn play_short_melody(&mut self) {
         let melody = &[
             (NOTE_A4, 500),
             (NOTE_B4, 500),
@@ -96,27 +70,15 @@ impl BuzzerDriver {
             (NOTE_G5, 500),
         ];
 
-        let mut pwm = self
-            .pwm
-            .try_lock()
-            .map_err(|_| BuzzerError::BuzzerRunning)?;
-
         for &(freq, dur_ms) in melody {
-            BuzzerDriver::play_tone(&mut pwm, freq, dur_ms).await?;
+            self.play_tone(freq, dur_ms).await;
             Timer::after_millis(100).await; // Short pause between notes
         }
-        pwm.set_duty_cycle_fully_off()
-            .map_err(|_| BuzzerError::InvalidDutyCycle)?;
-        Ok(())
+        self.off();
     }
 
-    pub fn off(&self) -> Result<(), BuzzerError> {
-        let mut pwm = self
-            .pwm
-            .try_lock()
-            .map_err(|_| BuzzerError::BuzzerRunning)?;
-
-        pwm.set_duty_cycle_fully_off()
-            .map_err(|_| BuzzerError::InvalidDutyCycle)
+    pub fn off(&mut self) {
+        // A duty cycle of 0 can't fail
+        let _ = self.pwm.set_duty_cycle_fully_off();
     }
 }

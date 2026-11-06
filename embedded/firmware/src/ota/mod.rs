@@ -1,3 +1,3 @@
 mod actor;
 mod record;
-pub use actor::{handle, spawn, OtaActor, OtaHandle, OtaPinning, VersionResponse};
+pub use actor::{OtaActor, OtaHandle, OtaPinning, VersionResponse, handle, spawn};

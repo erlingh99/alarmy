@@ -5,11 +5,12 @@ use core::panic::PanicInfo;
 use core::{mem, ptr, slice};
 
 use cortex_m::peripheral::SCB;
-use cortex_m_rt::{exception, ExceptionFrame};
+use cortex_m_rt::{ExceptionFrame, exception};
+use embassy_executor::Spawner;
+use embassy_rp::Peri;
 use embassy_rp::clocks;
 use embassy_rp::gpio::{AnyPin, Level, Output};
 use embassy_rp::pac;
-use embassy_rp::Peri;
 use embassy_time::Timer;
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -128,8 +129,12 @@ pub fn init(panic_pinning: Peri<'static, AnyPin>) {
 }
 
 /// Spawn once the network is up
+pub fn spawn_report(spawner: Spawner, http_client: &'static HttpClient) {
+    spawner.spawn(crash_report_task(http_client).unwrap());
+}
+
 #[embassy_executor::task]
-pub async fn crash_report_task(http_client: &'static HttpClient) {
+async fn crash_report_task(http_client: &'static HttpClient) {
     let crash = unsafe { ptr::read_volatile(CrashRecord::PTR) };
     let watchdog_reset = WATCHDOG_RESET.load(Ordering::Relaxed);
     if !crash.is_valid() && !watchdog_reset {
@@ -147,8 +152,13 @@ pub async fn crash_report_task(http_client: &'static HttpClient) {
     }
 }
 
+/// Spawn at boot, as it clears the crash count after a stable uptime
+pub fn spawn_stability(spawner: Spawner) {
+    spawner.spawn(stability_task().unwrap());
+}
+
 #[embassy_executor::task]
-pub async fn stability_task() {
+async fn stability_task() {
     let panics = panic_count();
     if panics == 0 {
         return;

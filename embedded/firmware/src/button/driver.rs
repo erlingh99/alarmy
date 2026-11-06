@@ -1,7 +1,7 @@
 use embassy_executor::Spawner;
 use embassy_rp::{
-    gpio::{AnyPin, Input, Level, Pull},
     Peri,
+    gpio::{AnyPin, Input, Level, Pull},
 };
 use embassy_time::{Duration, Timer};
 
@@ -18,22 +18,6 @@ pub struct Button {
     debounce_wait: Duration,
     id: ButtonId,
     presses: InputHandle,
-}
-
-pub fn spawn(
-    spawner: Spawner,
-    pin: Peri<'static, AnyPin>,
-    debounce_wait: Duration,
-    id: ButtonId,
-    presses: InputHandle,
-) {
-    let button = Button {
-        input: Input::new(pin, Pull::Down),
-        debounce_wait,
-        id,
-        presses,
-    };
-    spawner.spawn(button_task(button).unwrap());
 }
 
 impl Button {
@@ -55,6 +39,22 @@ impl Button {
             Timer::after_millis(500).await; //don't register double presses
         }
     }
+}
+
+pub fn spawn(
+    spawner: Spawner,
+    pin: Peri<'static, AnyPin>,
+    debounce_wait: Duration,
+    id: ButtonId,
+    presses: InputHandle,
+) {
+    let button = Button {
+        input: Input::new(pin, Pull::Down),
+        debounce_wait,
+        id,
+        presses,
+    };
+    spawner.spawn(button_task(button).unwrap());
 }
 
 #[embassy_executor::task(pool_size = 3)]
