@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 # The Pico writes this line as soon as it accepts a connection, before it has
 # read any command, so it arrives ahead of the response we actually asked for.
-GREETING_PREFIX = "Connected to Pico"
+GREETING_PREFIX = "Connected to Alarmy Pico"
 
 
 async def _read_command_response(reader: asyncio.StreamReader) -> str | None:

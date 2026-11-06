@@ -1,3 +1,3 @@
 mod driver;
 
-pub use driver::{button_task, Button, ButtonPinning};
+pub use driver::{ButtonPinning, spawn};

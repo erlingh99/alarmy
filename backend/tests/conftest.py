@@ -17,7 +17,7 @@ from app.routes.time_api import time_router
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
 
-GREETING = b"Connected to Pico TCP Server\n"
+GREETING = b"Connected to Alarmy Pico TCP Server\n"
 
 
 @pytest.fixture

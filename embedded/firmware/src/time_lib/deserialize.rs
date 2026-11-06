@@ -1,12 +1,12 @@
 use core::fmt;
 use heapless::{String, Vec};
 use serde::{
-    de::{self, SeqAccess, Visitor},
     Deserialize, Deserializer,
+    de::{self, SeqAccess, Visitor},
 };
-use time::macros::format_description;
 use time::Date;
 use time::Time;
+use time::macros::format_description;
 
 // Custom deserializer for vector of ISO datetimes to heapless::Vec<DateTime, N>
 pub fn deserialize_option_date_vec<'de, D, const N: usize>(
@@ -58,6 +58,8 @@ where
                 vec.push(element)
                     .map_err(|_| de::Error::custom("exceeded maximum capacity"))?;
             }
+            // next_trigger takes the first date still ahead
+            vec.sort_unstable();
 
             Ok(vec)
         }

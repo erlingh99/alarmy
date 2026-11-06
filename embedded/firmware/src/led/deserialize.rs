@@ -1,5 +1,5 @@
 use heapless::String;
-use serde::{de::Error, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de::Error};
 use smart_leds::RGB8;
 
 pub fn deserialize_hex<'de, D>(deserializer: D) -> Result<RGB8, D::Error>

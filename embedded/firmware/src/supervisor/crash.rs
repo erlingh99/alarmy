@@ -5,17 +5,18 @@ use core::panic::PanicInfo;
 use core::{mem, ptr, slice};
 
 use cortex_m::peripheral::SCB;
-use cortex_m_rt::{exception, ExceptionFrame};
+use cortex_m_rt::{ExceptionFrame, exception};
+use embassy_executor::Spawner;
+use embassy_rp::Peri;
 use embassy_rp::clocks;
 use embassy_rp::gpio::{AnyPin, Level, Output};
 use embassy_rp::pac;
-use embassy_rp::Peri;
 use embassy_time::Timer;
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::config::flash_config::{PANIC_LOG_ADDR, PANIC_LOG_SIZE};
 use crate::logging::TruncatingWriter;
-use crate::net::HttpClientManager;
+use crate::net::HttpClient;
 
 const COUNT_MAGIC: u32 = 0xC0DE_0000;
 /// Set in scratch 1 while running, so a stale watchdog reset reason isn't counted as a crash
@@ -127,49 +128,6 @@ pub fn init(panic_pinning: Peri<'static, AnyPin>) {
     }
 }
 
-/// Spawn once the network is up
-#[embassy_executor::task]
-pub async fn crash_report(http_client: &'static HttpClientManager) {
-    let crash = unsafe { ptr::read_volatile(CrashRecord::PTR) };
-    let watchdog_reset = WATCHDOG_RESET.load(Ordering::Relaxed);
-    if !crash.is_valid() && !watchdog_reset {
-        return;
-    }
-    // The HTTP log drops lines it fails to post
-    http_client.wait_for_backend().await;
-
-    if crash.is_valid() {
-        log::error!("Crashed on core {}: {}", crash.core, crash.message());
-        unsafe { ptr::addr_of_mut!((*CrashRecord::PTR).magic).write_volatile(0) };
-    }
-    if watchdog_reset {
-        log::error!("Reset by the watchdog: core0 hung or a core locked up");
-    }
-}
-
-#[embassy_executor::task]
-pub async fn stability_monitor() {
-    let panics = panic_count();
-    if panics == 0 {
-        return;
-    }
-    log::warn!("Recovered from a crash ({panics} in a row)");
-
-    Timer::after_secs(STABLE_UPTIME_S).await;
-    // Excludes fatal(), so a crash happening now is never cleared
-    let cleared = critical_section::with(|_| {
-        if CRASHED_CORE.load(Ordering::Acquire) != 0 {
-            return false;
-        }
-        set_panic_count(0);
-        unsafe { set_panic_led(false) };
-        true
-    });
-    if cleared {
-        log::info!("Running stably again, cleared the crash count");
-    }
-}
-
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     match info.location() {
@@ -233,4 +191,56 @@ fn fatal(message: fmt::Arguments) -> ! {
 pub fn reset() -> ! {
     pac::WATCHDOG.scratch1().write_value(0);
     SCB::sys_reset();
+}
+
+/// Spawn once the network is up
+pub fn spawn_report(spawner: Spawner, http_client: &'static HttpClient) {
+    spawner.spawn(crash_report_task(http_client).unwrap());
+}
+
+#[embassy_executor::task]
+async fn crash_report_task(http_client: &'static HttpClient) {
+    let crash = unsafe { ptr::read_volatile(CrashRecord::PTR) };
+    let watchdog_reset = WATCHDOG_RESET.load(Ordering::Relaxed);
+    if !crash.is_valid() && !watchdog_reset {
+        return;
+    }
+    // The HTTP log drops lines it fails to post
+    http_client.wait_for_backend().await;
+
+    if crash.is_valid() {
+        log::error!("Crashed on core {}: {}", crash.core, crash.message());
+        unsafe { ptr::addr_of_mut!((*CrashRecord::PTR).magic).write_volatile(0) };
+    }
+    if watchdog_reset {
+        log::error!("Reset by the watchdog: core0 hung or a core locked up");
+    }
+}
+
+/// Spawn at boot, as it clears the crash count after a stable uptime
+pub fn spawn_stability(spawner: Spawner) {
+    spawner.spawn(stability_task().unwrap());
+}
+
+#[embassy_executor::task]
+async fn stability_task() {
+    let panics = panic_count();
+    if panics == 0 {
+        return;
+    }
+    log::warn!("Recovered from a crash ({panics} in a row)");
+
+    Timer::after_secs(STABLE_UPTIME_S).await;
+    // Excludes fatal(), so a crash happening now is never cleared
+    let cleared = critical_section::with(|_| {
+        if CRASHED_CORE.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        set_panic_count(0);
+        unsafe { set_panic_led(false) };
+        true
+    });
+    if cleared {
+        log::info!("Running stably again, cleared the crash count");
+    }
 }

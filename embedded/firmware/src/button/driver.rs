@@ -1,9 +1,11 @@
+use embassy_executor::Spawner;
 use embassy_rp::{
-    gpio::{AnyPin, Input, Level, Pull},
     Peri,
+    gpio::{AnyPin, Input, Level, Pull},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Timer};
+
+use crate::input::{ButtonId, InputHandle};
 
 pub struct ButtonPinning {
     pub cancel: Peri<'static, AnyPin>,
@@ -14,17 +16,12 @@ pub struct ButtonPinning {
 pub struct Button {
     input: Input<'static>,
     debounce_wait: Duration,
+    id: ButtonId,
+    presses: InputHandle,
 }
 
 impl Button {
-    pub fn new(pin: Peri<'static, AnyPin>, debounce_wait: Duration) -> Self {
-        Self {
-            input: Input::new(pin, Pull::Down),
-            debounce_wait,
-        }
-    }
-
-    pub async fn debounce(&mut self) {
+    async fn debounce(&mut self) {
         loop {
             self.input.wait_for_falling_edge().await;
             Timer::after(self.debounce_wait).await;
@@ -33,17 +30,34 @@ impl Button {
             }
         }
     }
+
+    async fn run(&mut self) -> ! {
+        loop {
+            self.debounce().await;
+            log::debug!("button press");
+            self.presses.button_pressed(self.id);
+            Timer::after_millis(500).await; //don't register double presses
+        }
+    }
+}
+
+pub fn spawn(
+    spawner: Spawner,
+    pin: Peri<'static, AnyPin>,
+    debounce_wait: Duration,
+    id: ButtonId,
+    presses: InputHandle,
+) {
+    let button = Button {
+        input: Input::new(pin, Pull::Down),
+        debounce_wait,
+        id,
+        presses,
+    };
+    spawner.spawn(button_task(button).unwrap());
 }
 
 #[embassy_executor::task(pool_size = 3)]
-pub async fn button_task(
-    mut button: Button,
-    signal: &'static Signal<CriticalSectionRawMutex, ()>,
-) -> ! {
-    loop {
-        button.debounce().await;
-        log::debug!("button press");
-        signal.signal(());
-        Timer::after_millis(500).await; //don't register double presses
-    }
+async fn button_task(mut button: Button) -> ! {
+    button.run().await
 }

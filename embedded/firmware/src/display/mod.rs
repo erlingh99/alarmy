@@ -1,3 +1,5 @@
+mod actor;
 mod driver;
 
-pub use driver::{display_info_publisher, DisplayDriver, DisplayError, DisplayPinning};
+pub use actor::{DisplayHandle, handle, spawn};
+pub use driver::DisplayPinning;

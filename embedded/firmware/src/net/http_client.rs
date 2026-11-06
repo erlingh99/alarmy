@@ -1,23 +1,27 @@
+use embassy_net::Stack;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::{TcpClient, TcpClientState};
-use embassy_net::Stack;
 use embassy_rp::clocks::RoscRng;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
-use embassy_time::{Duration, Timer};
+use embassy_time::Duration;
 use embedded_io_async::Read as _;
 use heapless::Vec;
-use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
+use reqwless::client::{HttpClient as ReqwlessClient, TlsConfig, TlsVerify};
 use reqwless::headers::ContentType;
 use reqwless::request::{Method, RequestBuilder};
 use serde::Deserialize;
 
 use crate::alarm::model::Alarm;
 use crate::config::api_config::{
-    ALARM_SYNC_ROUTE, FIRMWARE_VERSION_ROUTE, HEALTH_ROUTE, LOG_ROUTE, RETRY_DELAY_S, TIME_ROUTE,
+    ALARM_SYNC_ROUTE, FIRMWARE_VERSION_ROUTE, HEALTH_ROUTE, LOG_ROUTE, TIME_ROUTE,
 };
+use crate::health::Backoff;
 use crate::ota::VersionResponse;
 use crate::time_lib::model::ApiTimeType;
+
+/// Up to 20 s between checks, so an OTA boot confirmation can't back off past its deadline
+const BACKEND_WAIT_MAX_DOUBLINGS: u32 = 2;
 
 /// Device-facing payload from the backend. The arming flag travels with the
 /// alarms so there is no window on boot where the device holds alarms but not
@@ -57,12 +61,12 @@ struct HttpBuffers {
     rx: [u8; 8192],
 }
 
-pub struct HttpClientManager {
+pub struct HttpClient {
     stack: &'static Stack<'static>,
     http_mutex: Mutex<CriticalSectionRawMutex, HttpBuffers>,
 }
 
-impl HttpClientManager {
+impl HttpClient {
     pub fn new(stack: &'static Stack<'static>) -> Self {
         Self {
             stack,
@@ -93,7 +97,8 @@ impl HttpClientManager {
             let tls_config =
                 TlsConfig::new(seed, &mut buf.tls_read, &mut buf.tls_write, TlsVerify::None);
 
-            let mut http_client = HttpClient::new_with_tls(&tcp_client, &dns_client, tls_config);
+            let mut http_client =
+                ReqwlessClient::new_with_tls(&tcp_client, &dns_client, tls_config);
             let request = http_client
                 .request(method, url)
                 .await
@@ -149,7 +154,7 @@ impl HttpClientManager {
             &mut buffers.tls_write,
             TlsVerify::None,
         );
-        let mut http = HttpClient::new_with_tls(&tcp, &dns, tls_config);
+        let mut http = ReqwlessClient::new_with_tls(&tcp, &dns, tls_config);
 
         let mut req = http
             .request(Method::GET, url)
@@ -223,13 +228,14 @@ impl HttpClientManager {
             })?;
         match health {
             HealthStatus::Ok => Ok(()),
-            _ => Err(NetworkError::BackendDown),
+            HealthStatus::NotOk => Err(NetworkError::BackendDown),
         }
     }
 
     pub async fn wait_for_backend(&self) {
+        let mut backoff = Backoff::new(BACKEND_WAIT_MAX_DOUBLINGS);
         while self.get_health().await.is_err() {
-            Timer::after_secs(RETRY_DELAY_S).await;
+            backoff.wait().await;
         }
     }
 

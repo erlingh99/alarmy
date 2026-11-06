@@ -1,7 +1,7 @@
-mod driver;
 mod http_client;
-mod tcp_server;
+mod stack;
+pub mod tcp_server;
+pub mod wifi;
 
-pub use driver::{NetworkManager, NetworkPinning, WIFI_CONNECTED};
-pub use http_client::{HttpClientManager, NetworkError};
-pub use tcp_server::TcpCommand;
+pub use http_client::{HttpClient, NetworkError};
+pub use stack::{NetworkPinning, spawn};

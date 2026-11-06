@@ -1,8 +1,4 @@
-//! WiFi credentials are not compiled into the firmware (the binary is served publicly for OTA).
-//! They are preflashed per device into the WIFI_CREDS sector by `embedded/scripts/flash_blobs.py`.
-//!
-//! Only the WPA2 PSK (PBKDF2 of the passphrase) is stored, never the passphrase itself.
-//!
+//! WiFi credentials are preflashed per device into the WIFI_CREDS sector by `embedded/scripts/flash_blobs.py`.
 //! Sector format: magic `AWC2`, ssid_len: u8, psk_len: u8 (0 or 32), ssid bytes, psk bytes.
 
 use heapless::{String, Vec};

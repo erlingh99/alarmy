@@ -1,22 +1,17 @@
+use embassy_rp::Peri;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::peripherals::{DMA_CH1, PIN_16, PIO1};
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
-use embassy_rp::Peri;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Ticker};
 use fastrand;
 use smart_leds::RGB8;
 
 use crate::alarm::model::IntensityCurve;
-use crate::config::led_config::{BLINK_INTERVAL_S, NUM_BLINKS, NUM_LEDS, UPDATE_INTERVAL_S};
+use crate::config::led_config::{
+    BLINK_INTERVAL_S, COLOR_REFRESH_INTERVAL_S, NUM_BLINKS, NUM_LEDS, UPDATE_INTERVAL_S,
+};
 use crate::interrupts::Irqs;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum LedError {
-    LedRunning,
-}
 
 pub struct LedPinning {
     pub pio_pin: Peri<'static, PIO1>,
@@ -25,7 +20,7 @@ pub struct LedPinning {
 }
 
 pub struct LedDriver {
-    ws2812: Mutex<CriticalSectionRawMutex, PioWs2812<'static, PIO1, 1, NUM_LEDS, Grb>>,
+    ws2812: PioWs2812<'static, PIO1, 1, NUM_LEDS, Grb>,
 }
 
 impl LedDriver {
@@ -43,19 +38,16 @@ impl LedDriver {
             led_pinning.data_pin,
             &program,
         );
-        let m = Mutex::new(ws2812);
-        LedDriver { ws2812: m }
+        LedDriver { ws2812 }
     }
 
     pub async fn follow_intensity_curve(
-        &self,
+        &mut self,
         color: &RGB8,
         intensity_curve: &IntensityCurve,
         length_min: u8,
         elapsed_secs: u32,
-    ) -> Result<(), LedError> {
-        let mut ws2812 = self.ws2812.try_lock().map_err(|_e| LedError::LedRunning)?;
-
+    ) {
         let length_s = length_min as u16 * 60;
 
         let mut ticker = Ticker::every(Duration::from_secs(UPDATE_INTERVAL_S as u64));
@@ -74,33 +66,26 @@ impl LedDriver {
             )
                 .into(); NUM_LEDS];
 
-            ws2812.write(&data).await;
+            self.ws2812.write(&data).await;
 
             ticker.next().await;
         }
-        ws2812.write(&[(0u8, 0u8, 0u8).into(); NUM_LEDS]).await;
-
-        Ok(())
+        self.ws2812.write(&[(0u8, 0u8, 0u8).into(); NUM_LEDS]).await;
     }
 
-    pub async fn blink(&self, color: &RGB8) -> Result<(), LedError> {
-        let mut ws2812 = self.ws2812.try_lock().map_err(|_e| LedError::LedRunning)?;
-
+    pub async fn blink(&mut self, color: &RGB8) {
         let mut blink_ticker = Ticker::every(Duration::from_secs(BLINK_INTERVAL_S));
         // blink LEDS
         for i in 0..NUM_BLINKS {
             let on = i % 2;
             let data = [(color.r * on, color.g * on, color.b * on).into(); NUM_LEDS];
-            ws2812.write(&data).await;
+            self.ws2812.write(&data).await;
             blink_ticker.next().await;
         }
-        ws2812.write(&[(0u8, 0u8, 0u8).into(); NUM_LEDS]).await;
-
-        Ok(())
+        self.ws2812.write(&[(0u8, 0u8, 0u8).into(); NUM_LEDS]).await;
     }
 
-    pub async fn run_wheel_once(&self) -> Result<(), LedError> {
-        let mut ws2812 = self.ws2812.try_lock().map_err(|_e| LedError::LedRunning)?;
+    pub async fn run_wheel_once(&mut self) {
         let mut data = [RGB8::default(); NUM_LEDS];
         let mut ticker = Ticker::every(Duration::from_millis(10));
 
@@ -110,21 +95,14 @@ impl LedDriver {
                 *d =
                     LedDriver::wheel((((i * 256) as u16 / NUM_LEDS as u16 + j as u16) & 255) as u8);
             }
-            ws2812.write(&data).await;
+            self.ws2812.write(&data).await;
             ticker.next().await;
         }
-        ws2812.write(&[(0u8, 0u8, 0u8).into(); NUM_LEDS]).await;
-        Ok(())
+        self.ws2812.write(&[(0u8, 0u8, 0u8).into(); NUM_LEDS]).await;
     }
 
-    pub async fn off(&self) -> Result<(), LedError> {
-        let mut ws2812 = self.ws2812.try_lock().map_err(|_e| LedError::LedRunning)?;
-        ws2812.write(&[(0u8, 0u8, 0u8).into(); NUM_LEDS]).await;
-        Ok(())
-    }
-
-    pub async fn fire(&self) -> Result<(), LedError> {
-        let mut ws2812 = self.ws2812.try_lock().map_err(|_| LedError::LedRunning)?;
+    /// Runs until dropped
+    pub async fn fire(&mut self) -> ! {
         let mut data = [RGB8::default(); NUM_LEDS];
         let mut ticker = Ticker::every(Duration::from_millis(50));
         let seed = RoscRng.next_u64();
@@ -159,19 +137,22 @@ impl LedDriver {
                 *d = RGB8::new(r, g, b);
             }
 
-            ws2812.write(&data).await;
+            self.ws2812.write(&data).await;
             ticker.next().await;
         }
     }
 
-    pub async fn color(&self, color: RGB8) -> Result<(), LedError> {
-        let mut ws2812 = self.ws2812.try_lock().map_err(|_e| LedError::LedRunning)?;
-        ws2812.write(&[color; NUM_LEDS]).await;
-        Ok(())
+    /// Runs until dropped
+    pub async fn color(&mut self, color: RGB8) -> ! {
+        let mut ticker = Ticker::every(Duration::from_secs(COLOR_REFRESH_INTERVAL_S));
+        loop {
+            self.ws2812.write(&[color; NUM_LEDS]).await;
+            ticker.next().await;
+        }
     }
 
-    pub async fn rainbow(&self) -> Result<(), LedError> {
-        let mut ws2812 = self.ws2812.try_lock().map_err(|_| LedError::LedRunning)?;
+    /// Runs until dropped
+    pub async fn rainbow(&mut self) -> ! {
         let mut data = [RGB8::default(); NUM_LEDS];
         let mut ticker = Ticker::every(Duration::from_millis(20));
         loop {
@@ -181,7 +162,7 @@ impl LedDriver {
                         (((i * 256) as u16 / NUM_LEDS as u16 + j as u16) & 255) as u8,
                     );
                 }
-                ws2812.write(&data).await;
+                self.ws2812.write(&data).await;
                 ticker.next().await;
             }
         }

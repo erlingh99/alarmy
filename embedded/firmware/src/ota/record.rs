@@ -3,7 +3,7 @@
 
 use embassy_rp::pac;
 
-use super::driver::OtaError;
+use super::actor::OtaError;
 
 pub type Version = (u32, u32, u32);
 

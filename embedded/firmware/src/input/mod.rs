@@ -1,3 +1,3 @@
-mod input_manager;
+mod actor;
 
-pub use input_manager::InputManager;
+pub use actor::{ButtonId, InputHandle, RemoteCommand, handle, spawn};
