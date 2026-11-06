@@ -13,7 +13,7 @@ use crate::health::{self, Backoff, Fault};
 /// Lets a fresh connection settle before the first health check
 const FIRST_CHECK_DELAY_S: u64 = 300;
 const CHECK_INTERVAL_S: u64 = 3600;
-const LINK_UP_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Consecutive failed health checks before rejoining (about 75 s of backoff)
 const MAX_FAILURES: u32 = 5;
 
@@ -61,11 +61,17 @@ impl WifiActor {
         loop {
             match self.control.join(&creds.ssid, join_options.clone()).await {
                 Ok(_) => {
-                    // The stack sees the link a moment after the join
-                    match with_timeout(LINK_UP_TIMEOUT, self.stack.wait_link_up()).await {
+                    // The stack sees the link a moment after the join, then DHCP runs
+                    let ready = async {
+                        self.stack.wait_link_up().await;
+                        self.stack.wait_config_up().await;
+                    };
+                    match with_timeout(CONNECT_TIMEOUT, ready).await {
                         Ok(()) => {
                             log::info!("WiFi connected successfully");
                             health::clear(Fault::Wifi);
+                            // A rejoin after an unreachable backend starts fresh
+                            health::clear(Fault::Backend);
                             backoff.reset();
                             set_connected(true);
                             match select(self.stack.wait_link_down(), self.wait_until_unreachable())
@@ -78,14 +84,11 @@ impl WifiActor {
                             }
                             set_connected(false);
                         }
-                        Err(_) => health::report(Fault::Wifi, "link never came up"),
+                        Err(_) => health::report(Fault::Wifi, "no link or IP after joining"),
                     }
                     self.control.leave().await;
                 }
-                Err(err) => {
-                    set_connected(false);
-                    health::report(Fault::Wifi, err);
-                }
+                Err(err) => health::report(Fault::Wifi, err),
             }
             backoff.wait().await;
             log::info!("Retrying WiFi connection...");

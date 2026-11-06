@@ -5,41 +5,33 @@ use embassy_net::tcp::TcpSocket;
 use embassy_time::{Duration, Timer};
 use heapless::String;
 use serde::Deserialize;
+use smart_leds::RGB8;
 
 use super::http_client::NetworkError;
 use crate::input::{InputHandle, RemoteCommand};
+use crate::led::deserialize::deserialize_hex;
 
 // TCP server configuration
 pub const TCP_SERVER_PORT: u16 = 8080;
 pub const COMMAND_BUFFER_SIZE: usize = 512;
+
+#[derive(Deserialize, Debug)]
+enum TcpCommand {
+    AlarmsUpdated,
+    CheckUpdate,
+    Idle,
+    Fire,
+    Rainbow,
+    #[serde(deserialize_with = "deserialize_hex")]
+    Color(RGB8),
+    Version,
+}
 
 /// Turns backend commands into input events
 /// Answers `Version` itself
 struct TcpServer {
     stack: &'static Stack<'static>,
     input: InputHandle,
-}
-
-/// The command answered here rather than passed on as a `RemoteCommand`
-#[derive(Deserialize, Debug)]
-enum Query {
-    Version,
-}
-
-#[derive(Debug)]
-enum TcpCommand {
-    Query(Query),
-    Remote(RemoteCommand),
-}
-
-impl TcpCommand {
-    fn parse(bytes: &[u8]) -> Option<Self> {
-        if let Ok((remote, _)) = serde_json_core::from_slice(bytes) {
-            return Some(TcpCommand::Remote(remote));
-        }
-        let (query, _) = serde_json_core::from_slice(bytes).ok()?;
-        Some(TcpCommand::Query(query))
-    }
 }
 
 impl TcpServer {
@@ -91,9 +83,9 @@ impl TcpServer {
                 }
             };
 
-            let command = match TcpCommand::parse(&buffer[..n]) {
-                Some(command) => command,
-                None => {
+            let command = match serde_json_core::from_slice::<TcpCommand>(&buffer[..n]) {
+                Ok((command, _)) => command,
+                Err(_) => {
                     let response = "ERROR: Invalid command\n";
                     let _ = socket.write(response.as_bytes()).await;
                     continue;
@@ -114,11 +106,16 @@ impl TcpServer {
     fn handle_command(&self, command: TcpCommand) -> String<32> {
         let mut response = String::new();
         let remote = match command {
-            TcpCommand::Query(Query::Version) => {
+            TcpCommand::AlarmsUpdated => RemoteCommand::AlarmsUpdated,
+            TcpCommand::CheckUpdate => RemoteCommand::CheckUpdate,
+            TcpCommand::Idle => RemoteCommand::Idle,
+            TcpCommand::Fire => RemoteCommand::Fire,
+            TcpCommand::Rainbow => RemoteCommand::Rainbow,
+            TcpCommand::Color(c) => RemoteCommand::Color(c),
+            TcpCommand::Version => {
                 let _ = writeln!(response, "VERSION: {}", env!("CARGO_PKG_VERSION"));
                 return response;
             }
-            TcpCommand::Remote(remote) => remote,
         };
         let _ = match self.input.remote_command(remote) {
             Ok(()) => writeln!(response, "OK: Command queued"),

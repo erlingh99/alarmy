@@ -4,7 +4,7 @@ import pytest
 
 from app.communication import tcp_client
 
-GREETING = b"Connected to Pico TCP Server\n"
+GREETING = b"Connected to Alarmy Pico TCP Server\n"
 
 
 async def _serve_like_pico(reply: bytes, *, greeting: bytes = GREETING):

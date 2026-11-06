@@ -218,7 +218,9 @@ impl AlarmScheduler {
         };
         STATUS.sender().send_if_modified(|value| {
             let changed = value.as_ref() != Some(&status);
-            *value = Some(status.clone());
+            if changed {
+                *value = Some(status.clone());
+            }
             changed
         });
     }

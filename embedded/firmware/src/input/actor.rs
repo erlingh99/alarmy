@@ -2,13 +2,11 @@
 //! other actors.
 
 use embassy_executor::Spawner;
-use serde::Deserialize;
 use smart_leds::RGB8;
 
 use crate::alarm::AlarmHandle;
 use crate::display::DisplayHandle;
 use crate::hardware::HardwareHandle;
-use crate::led::deserialize::deserialize_hex;
 use crate::mailbox::{Mailbox, MailboxReceiver, MailboxSender};
 use crate::ota::OtaHandle;
 
@@ -22,14 +20,13 @@ pub enum ButtonId {
 }
 
 /// Sent by the backend over TCP
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub enum RemoteCommand {
     AlarmsUpdated,
     CheckUpdate,
     Idle,
     Fire,
     Rainbow,
-    #[serde(deserialize_with = "deserialize_hex")]
     Color(RGB8),
 }
 
