@@ -58,6 +58,8 @@ where
                 vec.push(element)
                     .map_err(|_| de::Error::custom("exceeded maximum capacity"))?;
             }
+            // next_trigger takes the first date still ahead
+            vec.sort_unstable();
 
             Ok(vec)
         }

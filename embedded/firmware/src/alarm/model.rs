@@ -213,8 +213,8 @@ impl Alarm {
             }
             RecurrenceType::Custom => {
                 if let Some(dates) = &self.recurrence.custom_dates {
+                    // Sorted on deserialize
                     for date in dates {
-                        //assume dates are sorted
                         let next_time = date.with_time(self.time).assume_offset(UtcOffset::UTC)
                             - Duration::minutes(self.length as i64);
                         if next_time > now {

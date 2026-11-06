@@ -14,8 +14,8 @@ use crate::health::{self, Backoff, Fault};
 const FIRST_CHECK_DELAY_S: u64 = 300;
 const CHECK_INTERVAL_S: u64 = 3600;
 const LINK_UP_TIMEOUT: Duration = Duration::from_secs(30);
-/// Consecutive failed health checks before rejoining
-const MAX_FAILURES: u32 = 10;
+/// Consecutive failed health checks before rejoining (about 75 s of backoff)
+const MAX_FAILURES: u32 = 5;
 
 /// The display
 const SUBSCRIBERS: usize = 1;
