@@ -117,9 +117,12 @@ impl HardwareHandle {
     }
 
     /// `elapsed_secs` is how far into the alarm we already are, when resuming one
-    pub fn start_alarm(&self, alarm: Alarm, elapsed_secs: u32) {
+    /// Waits for room rather than dropping the alarm
+    pub async fn start_alarm(&self, alarm: Alarm, elapsed_secs: u32) {
         let started_at = Instant::now() - Duration::from_secs(elapsed_secs as u64);
-        self.request(Program::Alarm(alarm, started_at));
+        self.mailbox
+            .send(HardwareMsg::Request(Program::Alarm(alarm, started_at)))
+            .await;
     }
 
     fn request(&self, program: Program) {

@@ -7,7 +7,6 @@ use embassy_sync::watch::{Receiver, Watch};
 use embassy_time::Timer;
 
 use super::http_client::HttpClient;
-use crate::config::api_config::RETRY_DELAY_S;
 use crate::config::wifi_config::WifiCredentials;
 use crate::health::{self, Backoff, Fault};
 
@@ -26,6 +25,15 @@ pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, bool, SUBSCRIBE
     CONNECTED
         .receiver()
         .expect("more WiFi subscribers than SUBSCRIBERS allows")
+}
+
+/// Only wakes subscribers on a change
+fn set_connected(connected: bool) {
+    CONNECTED.sender().send_if_modified(|value| {
+        let changed = *value != Some(connected);
+        *value = Some(connected);
+        changed
+    });
 }
 
 /// Keeps WiFi connected, rejoining when the link drops or the backend stays unreachable
@@ -57,16 +65,16 @@ impl WifiActor {
                     backoff.reset();
                     // The stack sees the link a moment after the join
                     self.stack.wait_link_up().await;
-                    CONNECTED.sender().send(true);
+                    set_connected(true);
                     match select(self.stack.wait_link_down(), self.wait_until_unreachable()).await {
                         Either::First(()) => health::report(Fault::Wifi, "link down"),
                         Either::Second(()) => log::warn!("Backend unreachable, rejoining WiFi"),
                     }
-                    CONNECTED.sender().send(false);
+                    set_connected(false);
                     self.control.leave().await;
                 }
                 Err(err) => {
-                    CONNECTED.sender().send(false);
+                    set_connected(false);
                     health::report(Fault::Wifi, err);
                 }
             }
@@ -78,11 +86,13 @@ impl WifiActor {
     async fn wait_until_unreachable(&self) {
         Timer::after_secs(FIRST_CHECK_DELAY_S).await;
         let mut failures = 0;
+        let mut backoff = Backoff::new();
         loop {
             match self.http_client.get_health().await {
                 Ok(()) => {
                     health::clear(Fault::Backend);
                     failures = 0;
+                    backoff.reset();
                     Timer::after_secs(CHECK_INTERVAL_S).await;
                 }
                 Err(e) => {
@@ -91,7 +101,7 @@ impl WifiActor {
                     if failures > MAX_FAILURES {
                         return;
                     }
-                    Timer::after_secs(RETRY_DELAY_S).await;
+                    backoff.wait().await;
                 }
             }
         }

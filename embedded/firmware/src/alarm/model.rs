@@ -163,56 +163,17 @@ fn default_play_melody() -> bool {
 }
 
 impl Alarm {
-    /// Returns how many seconds into the alarm sequence we currently are, or None if no alarm is
-    /// currently mid-sequence. An alarm runs from `trigger_time` to `trigger_time + length * 60`.
+    /// Seconds into the alarm's current occurrence, or None if it isn't running. An alarm runs
+    /// from its trigger for `length` minutes.
     pub fn elapsed_in_alarm(&self, now: OffsetDateTime) -> Option<u32> {
         if !self.is_active {
             return None;
         }
-        let length_secs = self.length as i64 * 60;
-        match self.recurrence.recurrence_type {
-            RecurrenceType::Daily => {
-                let trigger = now.replace_time(self.time) - Duration::minutes(self.length as i64);
-                let elapsed = (now - trigger).whole_seconds();
-                if elapsed >= 0 && elapsed < length_secs {
-                    Some(elapsed as u32)
-                } else {
-                    None
-                }
-            }
-            RecurrenceType::Weekly => {
-                if let Some(days) = self.recurrence.days {
-                    let today_idx = now.weekday().number_from_monday() as usize - 1;
-                    for offset in 0..7usize {
-                        let check_day_idx = (today_idx + 7 - offset) % 7;
-                        if !days[check_day_idx] {
-                            continue;
-                        }
-                        let trigger = now.replace_time(self.time)
-                            - Duration::days(offset as i64)
-                            - Duration::minutes(self.length as i64);
-                        let elapsed = (now - trigger).whole_seconds();
-                        if elapsed >= 0 && elapsed < length_secs {
-                            return Some(elapsed as u32);
-                        }
-                    }
-                }
-                None
-            }
-            RecurrenceType::Custom => {
-                if let Some(dates) = &self.recurrence.custom_dates {
-                    for date in dates {
-                        let trigger = date.with_time(self.time).assume_offset(UtcOffset::UTC)
-                            - Duration::minutes(self.length as i64);
-                        let elapsed = (now - trigger).whole_seconds();
-                        if elapsed >= 0 && elapsed < length_secs {
-                            return Some(elapsed as u32);
-                        }
-                    }
-                }
-                None
-            }
-        }
+        // The only trigger whose window can still contain `now`
+        let trigger = self
+            .next_trigger(now - Duration::minutes(self.length as i64))
+            .ok()?;
+        u32::try_from((now - trigger).whole_seconds()).ok()
     }
 
     /// Seconds until the alarm next triggers, rounded up

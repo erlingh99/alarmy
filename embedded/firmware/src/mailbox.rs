@@ -28,15 +28,19 @@ impl<M> Mailbox<M> {
 }
 
 impl<M> MailboxSender<M> {
-    pub fn post(&self, msg: M) -> Result<(), TrySendError<M>> {
+    pub fn try_send(&self, msg: M) -> Result<(), TrySendError<M>> {
         self.0.try_send(msg)
+    }
+
+    pub async fn send(&self, msg: M) {
+        self.0.send(msg).await
     }
 }
 
 impl<M: Debug> MailboxSender<M> {
     /// For fire-and-forget messages: a full mailbox drops the message with a warning
     pub fn post_or_warn(&self, msg: M) {
-        if let Err(TrySendError::Full(msg)) = self.post(msg) {
+        if let Err(TrySendError::Full(msg)) = self.try_send(msg) {
             log::warn!("Mailbox full, dropped {msg:?}");
         }
     }

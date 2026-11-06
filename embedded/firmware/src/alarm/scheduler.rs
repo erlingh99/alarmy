@@ -2,7 +2,7 @@ use embassy_executor::Spawner;
 use embassy_futures::select::{Either4, select4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Watch};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer, with_deadline};
 use heapless::{String, Vec};
 use time::{OffsetDateTime, Time};
 
@@ -68,6 +68,8 @@ struct AlarmScheduler {
     enabled: Option<bool>,
     next_fetch: Instant,
     fetch_backoff: Backoff,
+    /// So a resync moving the clock back doesn't fire the same trigger twice
+    last_fired: Option<OffsetDateTime>,
 }
 
 impl AlarmScheduler {
@@ -77,7 +79,7 @@ impl AlarmScheduler {
         let mut sync = time.get().await;
         loop {
             let now = sync.utc_now();
-            let next = self.next_alarm(now);
+            let next = self.next_alarm(self.last_fired.map_or(now, |fired| now.max(fired)));
             self.publish_status(next.as_ref().map(|(alarm, _)| alarm));
 
             let due = match &next {
@@ -94,7 +96,10 @@ impl AlarmScheduler {
             {
                 Either4::First(AlarmMsg::Refresh) | Either4::Second(()) => {
                     log::info!("Alarm fetch triggered");
-                    self.fetch(sync).await;
+                    // Cut short when the alarm comes due, so a slow fetch can't delay it
+                    if with_deadline(due, self.fetch(sync)).await.is_err() {
+                        self.next_fetch = Instant::now();
+                    }
                 }
                 Either4::Third(()) => {}
                 Either4::Fourth(new_sync) => sync = new_sync,
@@ -105,13 +110,14 @@ impl AlarmScheduler {
                 && self.enabled == Some(true)
                 && sync.utc_now() >= trigger
             {
-                self.start_if_still_due(&alarm.id, trigger, sync.utc_now());
+                self.start_if_still_due(&alarm.id, trigger, sync.utc_now())
+                    .await;
             }
         }
     }
 
     /// Starts the stored copy of the alarm, unless a fetch since deleted, deactivated or moved it
-    fn start_if_still_due(&self, id: &str, trigger: OffsetDateTime, now: OffsetDateTime) {
+    async fn start_if_still_due(&mut self, id: &str, trigger: OffsetDateTime, now: OffsetDateTime) {
         let still_due = self.alarms.iter().find(|alarm| {
             alarm.id == id
                 && alarm.next_trigger(trigger - time::Duration::SECOND).ok() == Some(trigger)
@@ -120,7 +126,8 @@ impl AlarmScheduler {
             Some(alarm) => {
                 log::info!("Alarm '{}' due", alarm.name);
                 let elapsed = (now - trigger).whole_seconds().max(0) as u32;
-                self.hardware.start_alarm(alarm.clone(), elapsed);
+                self.last_fired = Some(trigger);
+                self.hardware.start_alarm(alarm.clone(), elapsed).await;
             }
             None => log::info!("Alarm due, but changed since it was scheduled"),
         }
@@ -138,7 +145,7 @@ impl AlarmScheduler {
                     log::info!("Alarms enabled: {}", sync.alarms_enabled);
                     // On boot and when re-enabled, so an alarm already mid-sequence starts too
                     if sync.alarms_enabled {
-                        self.resume_active_alarm(now);
+                        self.resume_active_alarm(now).await;
                     }
                 }
                 self.enabled = Some(sync.alarms_enabled);
@@ -189,14 +196,14 @@ impl AlarmScheduler {
             })
     }
 
-    fn resume_active_alarm(&self, now: OffsetDateTime) {
-        let active = self.alarms.iter().find_map(|alarm| {
-            let elapsed = alarm.elapsed_in_alarm(now)?;
-            Some((alarm.clone(), elapsed))
-        });
+    async fn resume_active_alarm(&self, now: OffsetDateTime) {
+        let active = self
+            .alarms
+            .iter()
+            .find_map(|alarm| Some((alarm.clone(), alarm.elapsed_in_alarm(now)?)));
         if let Some((alarm, elapsed)) = active {
             log::info!("Resuming alarm '{}' at {}s elapsed", alarm.name, elapsed);
-            self.hardware.start_alarm(alarm, elapsed);
+            self.hardware.start_alarm(alarm, elapsed).await;
         }
     }
 
@@ -224,6 +231,7 @@ pub fn spawn(spawner: Spawner, http_client: &'static HttpClient, hardware: Hardw
         enabled: None,
         next_fetch: Instant::now(),
         fetch_backoff: Backoff::new(),
+        last_fired: None,
     };
     spawner.spawn(alarm_task(scheduler).unwrap());
 }

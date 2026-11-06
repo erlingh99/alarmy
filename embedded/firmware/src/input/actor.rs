@@ -60,7 +60,7 @@ impl InputHandle {
 
     pub fn remote_command(&self, command: RemoteCommand) -> Result<(), InputQueueFull> {
         self.mailbox
-            .post(InputEvent::Remote(command))
+            .try_send(InputEvent::Remote(command))
             .map_err(|_| InputQueueFull)
     }
 }
