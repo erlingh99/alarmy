@@ -58,4 +58,8 @@ impl<M> MailboxReceiver<M> {
     pub async fn receive(&self) -> M {
         self.0.receive().await
     }
+
+    pub fn clear(&self) {
+        self.0.clear();
+    }
 }

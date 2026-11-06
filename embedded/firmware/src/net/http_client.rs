@@ -20,6 +20,9 @@ use crate::health::Backoff;
 use crate::ota::VersionResponse;
 use crate::time_lib::model::ApiTimeType;
 
+/// Up to 20 s between checks, so an OTA boot confirmation can't back off past its deadline
+const BACKEND_WAIT_MAX_DOUBLINGS: u32 = 2;
+
 /// Device-facing payload from the backend. The arming flag travels with the
 /// alarms so there is no window on boot where the device holds alarms but not
 /// yet the arming state.
@@ -230,7 +233,7 @@ impl HttpClient {
     }
 
     pub async fn wait_for_backend(&self) {
-        let mut backoff = Backoff::new();
+        let mut backoff = Backoff::new(BACKEND_WAIT_MAX_DOUBLINGS);
         while self.get_health().await.is_err() {
             backoff.wait().await;
         }

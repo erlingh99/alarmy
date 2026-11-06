@@ -85,11 +85,7 @@ impl DisplayActor {
         match msg {
             DisplayMsg::Toggle => {
                 self.on = !self.on;
-                if self.on {
-                    self.render().await;
-                } else {
-                    self.blank().await;
-                }
+                self.draw().await;
             }
         }
     }
@@ -97,7 +93,7 @@ impl DisplayActor {
     /// Initialises the screen and shows a splash, retrying until it succeeds. Messages wait in
     /// the mailbox meanwhile.
     async fn init(&mut self) {
-        let mut backoff = Backoff::new();
+        let mut backoff = Backoff::default();
         loop {
             let result = with_timeout(INIT_TIMEOUT, self.driver.init())
                 .await
@@ -130,31 +126,37 @@ impl DisplayActor {
     }
 
     async fn render(&mut self) {
-        if !self.on {
-            return;
+        if self.on {
+            self.draw().await;
         }
-        let info = DisplayInfo {
-            time: self.time.as_ref().map(TimeSync::local_now),
-            next_alarm: self.alarms.as_ref().and_then(|status| status.next.clone()),
-            wifi_connected: self.wifi_connected,
-            alarms_enabled: self.alarms.as_ref().is_none_or(|status| status.enabled),
-            hw_state: self.hw_state,
-            faults: self.faults,
-        };
-        let result = self.driver.render(&info).await;
-        report(result);
     }
 
-    async fn blank(&mut self) {
-        let result = self.driver.blank().await;
-        report(result);
-    }
-}
-
-fn report(result: Result<(), DisplayError>) {
-    match result {
-        Ok(()) => health::clear(Fault::Display),
-        Err(e) => health::report(Fault::Display, e),
+    /// Draws the screen, or blanks it when off. A failure reinitialises the panel, which may
+    /// have lost power and its init with it, then draws again.
+    async fn draw(&mut self) {
+        loop {
+            let result = if self.on {
+                let info = DisplayInfo {
+                    time: self.time.as_ref().map(TimeSync::local_now),
+                    next_alarm: self.alarms.as_ref().and_then(|status| status.next.clone()),
+                    wifi_connected: self.wifi_connected,
+                    alarms_enabled: self.alarms.as_ref().is_none_or(|status| status.enabled),
+                    hw_state: self.hw_state,
+                    faults: self.faults,
+                };
+                self.driver.render(&info).await
+            } else {
+                self.driver.blank().await
+            };
+            match result {
+                Ok(()) => {
+                    health::clear(Fault::Display);
+                    return;
+                }
+                Err(e) => health::report(Fault::Display, e),
+            }
+            self.init().await;
+        }
     }
 }
 

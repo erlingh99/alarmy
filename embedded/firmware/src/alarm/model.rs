@@ -186,12 +186,13 @@ impl Alarm {
     pub fn next_trigger(&self, now: OffsetDateTime) -> Result<OffsetDateTime, AlarmError> {
         match self.recurrence.recurrence_type {
             RecurrenceType::Daily => {
-                let next_time = now.replace_time(self.time) - Duration::minutes(self.length as i64);
-                if next_time > now {
-                    Ok(next_time)
-                } else {
-                    Ok(next_time + Duration::days(1)) // next day
+                let mut next_time =
+                    now.replace_time(self.time) - Duration::minutes(self.length as i64);
+                // Twice when the trigger falls the day before its alarm
+                while next_time <= now {
+                    next_time += Duration::days(1);
                 }
+                Ok(next_time)
             }
             RecurrenceType::Weekly => {
                 let today = now.weekday().number_from_monday() - 1; // 0 = Monday, 6 = Sunday
@@ -199,8 +200,9 @@ impl Alarm {
                     now.replace_time(self.time) - Duration::minutes(self.length as i64);
                 if let Some(mut days) = self.recurrence.days {
                     days.rotate_left(today as usize);
-                    // 8 days, so today's weekday next week counts once today's trigger has passed
-                    for &day in days.iter().cycle().take(8) {
+                    // 9 days: a trigger can fall the day before its alarm, so tomorrow's weekday
+                    // next week may be the first still ahead
+                    for &day in days.iter().cycle().take(9) {
                         if day && next_time > now {
                             return Ok(next_time);
                         }

@@ -305,6 +305,8 @@ impl OtaActor {
                 Err(e) => health::report(Fault::Ota, e),
             }
             self.download_pin.set_low();
+            // Requests that arrived during the check were answered by it
+            self.mailbox.clear();
             match self.mailbox.receive().await {
                 OtaMsg::CheckForUpdate => {}
             }

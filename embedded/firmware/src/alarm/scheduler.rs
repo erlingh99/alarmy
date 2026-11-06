@@ -87,21 +87,21 @@ impl AlarmScheduler {
                 _ => Instant::MAX,
             };
             match select4(
+                Timer::at(due),
                 self.mailbox.receive(),
                 Timer::at(self.next_fetch),
-                Timer::at(due),
                 time.changed(),
             )
             .await
             {
-                Either4::First(AlarmMsg::Refresh) | Either4::Second(()) => {
+                Either4::First(()) => {}
+                Either4::Second(AlarmMsg::Refresh) | Either4::Third(()) => {
                     log::info!("Alarm fetch triggered");
                     // Cut short when the alarm comes due, so a slow fetch can't delay it
                     if with_deadline(due, self.fetch(sync)).await.is_err() {
                         self.next_fetch = Instant::now();
                     }
                 }
-                Either4::Third(()) => {}
                 Either4::Fourth(new_sync) => sync = new_sync,
             }
 
@@ -216,9 +216,11 @@ impl AlarmScheduler {
             enabled,
             next: next.map(|alarm| (alarm.name.clone(), alarm.time)),
         };
-        if STATUS.try_get().as_ref() != Some(&status) {
-            STATUS.sender().send(status);
-        }
+        STATUS.sender().send_if_modified(|value| {
+            let changed = value.as_ref() != Some(&status);
+            *value = Some(status.clone());
+            changed
+        });
     }
 }
 
@@ -230,7 +232,7 @@ pub fn spawn(spawner: Spawner, http_client: &'static HttpClient, hardware: Hardw
         alarms: Vec::new(),
         enabled: None,
         next_fetch: Instant::now(),
-        fetch_backoff: Backoff::new(),
+        fetch_backoff: Backoff::default(),
         last_fired: None,
     };
     spawner.spawn(alarm_task(scheduler).unwrap());

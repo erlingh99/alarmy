@@ -60,7 +60,7 @@ struct Clock {
 impl Clock {
     async fn run(&self) -> ! {
         log::info!("Starting time sync");
-        let mut backoff = Backoff::new();
+        let mut backoff = Backoff::default();
         loop {
             match self.sync().await {
                 Ok(sync) => {

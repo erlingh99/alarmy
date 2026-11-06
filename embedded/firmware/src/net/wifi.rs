@@ -4,7 +4,7 @@ use embassy_futures::select::{Either, select};
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Watch};
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer, with_timeout};
 
 use super::http_client::HttpClient;
 use crate::config::wifi_config::WifiCredentials;
@@ -13,6 +13,7 @@ use crate::health::{self, Backoff, Fault};
 /// Lets a fresh connection settle before the first health check
 const FIRST_CHECK_DELAY_S: u64 = 300;
 const CHECK_INTERVAL_S: u64 = 3600;
+const LINK_UP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Consecutive failed health checks before rejoining
 const MAX_FAILURES: u32 = 10;
 
@@ -56,21 +57,29 @@ impl WifiActor {
             options
         };
 
-        let mut backoff = Backoff::new();
+        let mut backoff = Backoff::default();
         loop {
             match self.control.join(&creds.ssid, join_options.clone()).await {
                 Ok(_) => {
-                    log::info!("WiFi connected successfully");
-                    health::clear(Fault::Wifi);
-                    backoff.reset();
                     // The stack sees the link a moment after the join
-                    self.stack.wait_link_up().await;
-                    set_connected(true);
-                    match select(self.stack.wait_link_down(), self.wait_until_unreachable()).await {
-                        Either::First(()) => health::report(Fault::Wifi, "link down"),
-                        Either::Second(()) => log::warn!("Backend unreachable, rejoining WiFi"),
+                    match with_timeout(LINK_UP_TIMEOUT, self.stack.wait_link_up()).await {
+                        Ok(()) => {
+                            log::info!("WiFi connected successfully");
+                            health::clear(Fault::Wifi);
+                            backoff.reset();
+                            set_connected(true);
+                            match select(self.stack.wait_link_down(), self.wait_until_unreachable())
+                                .await
+                            {
+                                Either::First(()) => health::report(Fault::Wifi, "link down"),
+                                Either::Second(()) => {
+                                    log::warn!("Backend unreachable, rejoining WiFi")
+                                }
+                            }
+                            set_connected(false);
+                        }
+                        Err(_) => health::report(Fault::Wifi, "link never came up"),
                     }
-                    set_connected(false);
                     self.control.leave().await;
                 }
                 Err(err) => {
@@ -86,7 +95,7 @@ impl WifiActor {
     async fn wait_until_unreachable(&self) {
         Timer::after_secs(FIRST_CHECK_DELAY_S).await;
         let mut failures = 0;
-        let mut backoff = Backoff::new();
+        let mut backoff = Backoff::default();
         loop {
             match self.http_client.get_health().await {
                 Ok(()) => {
@@ -98,7 +107,7 @@ impl WifiActor {
                 Err(e) => {
                     health::report(Fault::Backend, e);
                     failures += 1;
-                    if failures > MAX_FAILURES {
+                    if failures >= MAX_FAILURES {
                         return;
                     }
                     backoff.wait().await;

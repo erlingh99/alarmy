@@ -5,7 +5,7 @@ use embassy_futures::join::join;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Watch};
-use embassy_time::{Duration, Instant};
+use embassy_time::Instant;
 use smart_leds::RGB8;
 
 use crate::alarm::model::Alarm;
@@ -24,12 +24,7 @@ pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, HardwareState, 
         .expect("more hardware state subscribers than SUBSCRIBERS allows")
 }
 
-static MAILBOX: Mailbox<HardwareMsg> = Mailbox::new();
-
-#[derive(Debug)]
-enum HardwareMsg {
-    Request(Program),
-}
+static MAILBOX: Mailbox<Program> = Mailbox::new();
 
 /// What the hardware is playing, as published to subscribers
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,8 +55,12 @@ enum Program {
     /// Runs the LEDs and buzzer once at boot
     Init,
     Idle,
-    /// Played from `started_at`, so a restart resumes where it was
-    Alarm(Alarm, Instant),
+    /// `elapsed_secs` into the alarm at `at`, so a resumed alarm picks up where it was
+    Alarm {
+        alarm: Alarm,
+        elapsed_secs: u32,
+        at: Instant,
+    },
     Color(RGB8),
     Fire,
     Rainbow,
@@ -72,7 +71,7 @@ impl Program {
         match self {
             Program::Init => HardwareState::Init,
             Program::Idle => HardwareState::Idle,
-            Program::Alarm(..) => HardwareState::Alarm,
+            Program::Alarm { .. } => HardwareState::Alarm,
             Program::Color(_) => HardwareState::Color,
             Program::Fire => HardwareState::Fire,
             Program::Rainbow => HardwareState::Rainbow,
@@ -82,7 +81,7 @@ impl Program {
     /// The same alarm asked for again, from a different start, keeps playing
     fn is_same(&self, other: &Program) -> bool {
         match (self, other) {
-            (Program::Alarm(a, _), Program::Alarm(b, _)) => a == b,
+            (Program::Alarm { alarm: a, .. }, Program::Alarm { alarm: b, .. }) => a == b,
             _ => self == other,
         }
     }
@@ -90,7 +89,7 @@ impl Program {
 
 #[derive(Clone, Copy)]
 pub struct HardwareHandle {
-    mailbox: MailboxSender<HardwareMsg>,
+    mailbox: MailboxSender<Program>,
 }
 
 pub fn handle() -> HardwareHandle {
@@ -119,14 +118,16 @@ impl HardwareHandle {
     /// `elapsed_secs` is how far into the alarm we already are, when resuming one
     /// Waits for room rather than dropping the alarm
     pub async fn start_alarm(&self, alarm: Alarm, elapsed_secs: u32) {
-        let started_at = Instant::now() - Duration::from_secs(elapsed_secs as u64);
-        self.mailbox
-            .send(HardwareMsg::Request(Program::Alarm(alarm, started_at)))
-            .await;
+        let program = Program::Alarm {
+            alarm,
+            elapsed_secs,
+            at: Instant::now(),
+        };
+        self.mailbox.send(program).await;
     }
 
     fn request(&self, program: Program) {
-        self.mailbox.post_or_warn(HardwareMsg::Request(program));
+        self.mailbox.post_or_warn(program);
     }
 }
 
@@ -134,7 +135,7 @@ impl HardwareHandle {
 struct HardwareActor {
     led_driver: LedDriver,
     buzzer_driver: BuzzerDriver,
-    mailbox: MailboxReceiver<HardwareMsg>,
+    mailbox: MailboxReceiver<Program>,
     program: Program,
 }
 
@@ -163,8 +164,8 @@ impl HardwareActor {
         loop {
             match select(&mut playing, self.mailbox.receive()).await {
                 Either::First(()) => return Program::Idle,
-                Either::Second(HardwareMsg::Request(next)) if !next.is_same(&self.program) => {
-                    if let Program::Alarm(alarm, _) = &self.program {
+                Either::Second(next) if !next.is_same(&self.program) => {
+                    if let Program::Alarm { alarm, .. } = &self.program {
                         log::info!("Alarm '{}' cancelled", alarm.name);
                     }
                     return next;
@@ -185,9 +186,13 @@ async fn play(led: &mut LedDriver, buzzer: &mut BuzzerDriver, program: &Program)
             buzzer.play_short_melody().await;
             log::info!("All OK");
         }
-        Program::Alarm(alarm, started_at) => {
+        Program::Alarm {
+            alarm,
+            elapsed_secs,
+            at,
+        } => {
             buzzer.off();
-            let elapsed_secs = started_at.elapsed().as_secs() as u32;
+            let elapsed_secs = elapsed_secs + at.elapsed().as_secs() as u32;
             led.follow_intensity_curve(
                 &alarm.color,
                 &alarm.intensity_curve,
