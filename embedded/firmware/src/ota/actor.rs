@@ -1,5 +1,6 @@
 use core::cell::RefCell;
 
+use embassy_boot::FirmwareUpdaterError;
 use embassy_boot_rp::{AlignedBuffer, BlockingFirmwareUpdater, FirmwareUpdaterConfig, State};
 use embassy_executor::Spawner;
 use embassy_rp::Peri;
@@ -9,6 +10,7 @@ use embassy_rp::peripherals::FLASH;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Instant, Timer};
+use heapless::String;
 use serde::Deserialize;
 
 use crate::config::api_config::FIRMWARE_BINARY_ROUTE;
@@ -36,12 +38,20 @@ const CURRENT_MAJOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MAJOR"));
 const CURRENT_MINOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MINOR"));
 const CURRENT_PATCH: u32 = parse_u32(env!("CARGO_PKG_VERSION_PATCH"));
 
+/// Updates must be signed with its private key, see scripts/signing_key.py
+const SIGNING_PUBLIC_KEY: &[u8; 32] = include_bytes!("../../signing_key.pub");
+
 #[derive(Debug)]
 pub enum OtaError {
-    Network,
+    #[allow(dead_code)] // Read through Debug when reported
+    Network(NetworkError),
     Flash,
     /// A version part over 255, which the 8 bit OTA record can't hold
     UnsupportedVersion,
+    /// The backend has no signature for the image, or it is malformed
+    Unsigned,
+    /// The downloaded image doesn't match its signature
+    BadSignature,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +59,26 @@ pub struct VersionResponse {
     major: u32,
     minor: u32,
     patch: u32,
+}
+
+#[derive(Deserialize)]
+pub struct SignatureResponse {
+    /// Ed25519 signature of the image's SHA-512 digest, in hex
+    signature: String<128>,
+}
+
+impl SignatureResponse {
+    fn bytes(&self) -> Option<[u8; 64]> {
+        let hex = self.signature.as_bytes();
+        let mut signature = [0; 64];
+        if hex.len() != 2 * signature.len() {
+            return None;
+        }
+        for (byte, pair) in signature.iter_mut().zip(hex.chunks(2)) {
+            *byte = u8::from_str_radix(core::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(signature)
+    }
 }
 
 pub(super) type FlashMutex =
@@ -190,7 +220,7 @@ impl OtaActor {
         let resp = http_client
             .get_firmware_version()
             .await
-            .map_err(|_| OtaError::Network)?;
+            .map_err(OtaError::Network)?;
 
         let available = (resp.major, resp.minor, resp.patch);
         if available <= (CURRENT_MAJOR, CURRENT_MINOR, CURRENT_PATCH) {
@@ -199,6 +229,15 @@ impl OtaActor {
         if !record::is_supported(available) {
             return Err(OtaError::UnsupportedVersion);
         }
+        let signature = http_client
+            .get_firmware_signature()
+            .await
+            .map_err(|e| match e {
+                NetworkError::HttpStatus(404) => OtaError::Unsigned,
+                e => OtaError::Network(e),
+            })?
+            .bytes()
+            .ok_or(OtaError::Unsigned)?;
         if record::failed() == Some(available) {
             log::warn!(
                 "OTA: v{}.{}.{} failed to boot before, skipping it until a power cycle",
@@ -219,15 +258,17 @@ impl OtaActor {
             CURRENT_PATCH
         );
 
-        self.download_flash_and_reset(http_client, available).await
+        self.download_flash_and_reset(http_client, available, &signature)
+            .await
     }
 
-    /// Streams the firmware binary from the backend into the DFU flash partition,
-    /// marks it for swap, and triggers a soft reset. Does not return on success.
+    /// Streams the firmware binary from the backend into the DFU flash partition, marks it for
+    /// swap if it matches `signature`, and triggers a soft reset. Does not return on success.
     async fn download_flash_and_reset(
         &self,
         http_client: &HttpClient,
         version: Version,
+        signature: &[u8; 64],
     ) -> Result<(), OtaError> {
         let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&self.flash, &self.flash);
         let mut aligned = AlignedBuffer([0; 1]);
@@ -237,7 +278,7 @@ impl OtaActor {
         let mut fill = 0usize;
         let mut flash_offset = 0usize;
 
-        http_client
+        let image_len = http_client
             .stream_response(FIRMWARE_BINARY_ROUTE, |chunk| {
                 let mut pos = 0;
                 while pos < chunk.len() {
@@ -260,7 +301,7 @@ impl OtaActor {
             .await
             .map_err(|e| match e {
                 NetworkError::FlashError => OtaError::Flash,
-                _ => OtaError::Network,
+                e => OtaError::Network(e),
             })?;
 
         // Pad and flush the final partial chunk.
@@ -277,11 +318,19 @@ impl OtaActor {
         // Before the swap, so a revert knows which version failed
         record::set_pending(version)?;
 
-        log::info!("OTA: {flash_offset} total bytes written, marking DFU for swap");
-        if updater.mark_updated().is_err() {
-            // No swap is scheduled, so don't leave the version recorded as being installed
-            record::clear_pending();
-            return Err(OtaError::Flash);
+        log::info!("OTA: {flash_offset} total bytes written, verifying signature");
+        // Over the image as served, not the padding
+        match updater.verify_and_mark_updated(SIGNING_PUBLIC_KEY, signature, image_len as u32) {
+            Ok(()) => log::info!("OTA: Signature valid, DFU marked for swap"),
+            Err(e) => {
+                // No swap is scheduled, so don't leave the version recorded as being installed
+                record::clear_pending();
+                //TODO should probably record as failed
+                return Err(match e {
+                    FirmwareUpdaterError::Signature(_) => OtaError::BadSignature,
+                    _ => OtaError::Flash,
+                });
+            }
         }
 
         log::info!("OTA: Resetting...");

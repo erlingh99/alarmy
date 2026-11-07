@@ -12,6 +12,6 @@ async def get_time() -> dict[str, int]:
     now = datetime.now(ZoneInfo(os.environ.get("TZ", "UTC")))
     utc_offset = now.utcoffset() or timedelta()
     return {
-        "timestamp": int(now.timestamp()),
+        "timestamp_ms": int(now.timestamp() * 1000),
         "utc_offset_seconds": int(utc_offset.total_seconds()),
     }

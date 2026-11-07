@@ -16,6 +16,15 @@ async def get_firmware_version() -> dict[str, int]:
     return {"major": int(major), "minor": int(minor), "patch": int(patch)}
 
 
+@firmware_router.get("/signature")
+async def get_firmware_signature() -> dict[str, str]:
+    """Ed25519 signature of the served image's SHA-512 digest, in hex."""
+    signature_file = FIRMWARE_DIR / "firmware.sig"
+    if not signature_file.exists():
+        raise HTTPException(status_code=404, detail="No firmware signature available")
+    return {"signature": signature_file.read_text().strip()}
+
+
 @firmware_router.get("/device-version")
 async def get_device_version() -> dict[str, int]:
     response = await send_message_to_led_controller('"Version"')

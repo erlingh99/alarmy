@@ -48,6 +48,8 @@ smart-leds = "0.4.0"
 micromath = "2.1.0"
 fastrand = { version = "2.3.0", default-features = false }
 embassy-boot-rp = "0.10.0"
+# Same version as embassy-boot-rp uses, only to enable signature checks on OTA images
+embassy-boot = { version = "0.7.0", features = ["ed25519-salty"] }
 embedded-storage-async = "0.4.1"
 embedded-io-async = "0.7.0"
 ssd1306 = { version = "0.10.0", features = ["async", "graphics"] }

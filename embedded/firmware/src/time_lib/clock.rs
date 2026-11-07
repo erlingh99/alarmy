@@ -2,7 +2,7 @@ use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Watch};
 use embassy_time::{Instant, Timer};
-use time::{Duration, OffsetDateTime, UtcOffset};
+use time::{Duration, OffsetDateTime, PlainDateTime, UtcOffset};
 
 use crate::config::api_config::TIME_SYNC_INTERVAL_S;
 use crate::health::{self, Backoff, Fault};
@@ -40,11 +40,16 @@ impl TimeSync {
         self.utc + Duration::microseconds(since)
     }
 
-    pub fn local_now(&self) -> OffsetDateTime {
-        self.utc_now().to_offset(self.utc_offset)
+    /// Local wall-clock time. Has no offset, so it can't be mistaken for UTC.
+    pub fn local_now(&self) -> PlainDateTime {
+        let local = self.utc_now().to_offset(self.utc_offset);
+        PlainDateTime::new(local.date(), local.time())
     }
 
-    pub fn instant_at(&self, utc: OffsetDateTime) -> Instant {
+    /// Uses the offset at the last sync, so a time past a DST change is off by the change until
+    /// the next resync
+    pub fn instant_at(&self, local: PlainDateTime) -> Instant {
+        let utc = local.assume_offset(self.utc_offset);
         // Rounded up, so a timer at this instant never wakes early
         let micros = (utc - self.utc + Duration::nanoseconds(999))
             .whole_microseconds()
@@ -79,19 +84,21 @@ impl Clock {
     }
 
     async fn sync(&self) -> Result<TimeSync, TimeError> {
+        let before = Instant::now();
         let time_data = self
             .http_client
             .get_time()
             .await
             .map_err(|_| TimeError::NetworkError)?;
-        let at = Instant::now();
-        let utc = OffsetDateTime::from_unix_timestamp(time_data.timestamp as i64)
-            .map_err(|_| TimeError::InvalidResponse)?;
+        let after = Instant::now();
+        let utc =
+            OffsetDateTime::from_unix_timestamp_nanos(time_data.timestamp_ms as i128 * 1_000_000)
+                .map_err(|_| TimeError::InvalidResponse)?;
         let utc_offset = UtcOffset::from_whole_seconds(time_data.utc_offset_seconds)
             .map_err(|_| TimeError::InvalidResponse)?;
         Ok(TimeSync {
             utc,
-            at,
+            at: before + (after - before) / 2,
             utc_offset,
         })
     }

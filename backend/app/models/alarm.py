@@ -66,7 +66,7 @@ class AlarmUpdate(BaseModel):
 
 
 class AlarmSync(BaseModel):
-    """Everything the Pico needs in one payload.
+    """A page of the active alarms, with everything else the Pico needs.
 
     The flag travels with the alarms so there is no window on boot where the
     device holds alarms but not yet the arming state.
@@ -74,3 +74,4 @@ class AlarmSync(BaseModel):
 
     alarms: list[Alarm]
     alarms_enabled: bool
+    has_more: bool = False

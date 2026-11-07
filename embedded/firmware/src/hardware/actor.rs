@@ -6,6 +6,7 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver, Watch};
 use embassy_time::Instant;
+use heapless::String;
 use smart_leds::RGB8;
 
 use crate::alarm::model::Alarm;
@@ -24,7 +25,7 @@ pub fn subscribe() -> Receiver<'static, CriticalSectionRawMutex, HardwareState, 
         .expect("more hardware state subscribers than SUBSCRIBERS allows")
 }
 
-static MAILBOX: Mailbox<Program> = Mailbox::new();
+static MAILBOX: Mailbox<HardwareMsg> = Mailbox::new();
 
 /// What the hardware is playing, as published to subscribers
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,6 +49,13 @@ impl HardwareState {
             HardwareState::Rainbow => "Rainbow",
         }
     }
+}
+
+#[derive(Debug)]
+enum HardwareMsg {
+    Play(Program),
+    /// Stops the alarm with this id, if it is the one playing
+    StopAlarm(String<36>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,7 +97,7 @@ impl Program {
 
 #[derive(Clone, Copy)]
 pub struct HardwareHandle {
-    mailbox: MailboxSender<Program>,
+    mailbox: MailboxSender<HardwareMsg>,
 }
 
 pub fn handle() -> HardwareHandle {
@@ -123,11 +131,16 @@ impl HardwareHandle {
             elapsed_secs,
             at: Instant::now(),
         };
-        self.mailbox.send(program).await;
+        self.mailbox.send(HardwareMsg::Play(program)).await;
+    }
+
+    /// Leaves anything other than this alarm playing
+    pub fn stop_alarm(&self, id: String<36>) {
+        self.mailbox.post_or_warn(HardwareMsg::StopAlarm(id));
     }
 
     fn request(&self, program: Program) {
-        self.mailbox.post_or_warn(program);
+        self.mailbox.post_or_warn(HardwareMsg::Play(program));
     }
 }
 
@@ -135,7 +148,7 @@ impl HardwareHandle {
 struct HardwareActor {
     led_driver: LedDriver,
     buzzer_driver: BuzzerDriver,
-    mailbox: MailboxReceiver<Program>,
+    mailbox: MailboxReceiver<HardwareMsg>,
     program: Program,
 }
 
@@ -153,8 +166,8 @@ impl HardwareActor {
         }
     }
 
-    /// Plays the current program until it finishes or a request replaces it. A request for the
-    /// current program leaves it playing undisturbed.
+    /// Plays the current program until it finishes or a request replaces or stops it. A request
+    /// for the current program leaves it playing undisturbed.
     async fn play_until_new(&mut self) -> Program {
         let mut playing = pin!(play(
             &mut self.led_driver,
@@ -164,13 +177,21 @@ impl HardwareActor {
         loop {
             match select(&mut playing, self.mailbox.receive()).await {
                 Either::First(()) => return Program::Idle,
-                Either::Second(next) if !next.is_same(&self.program) => {
+                Either::Second(HardwareMsg::Play(next)) if !next.is_same(&self.program) => {
                     if let Program::Alarm { alarm, .. } = &self.program {
                         log::info!("Alarm '{}' cancelled", alarm.name);
                     }
                     return next;
                 }
-                Either::Second(_) => {}
+                Either::Second(HardwareMsg::Play(_)) => {}
+                Either::Second(HardwareMsg::StopAlarm(id)) => {
+                    if let Program::Alarm { alarm, .. } = &self.program
+                        && alarm.id == id
+                    {
+                        log::info!("Alarm '{}' stopped, no longer scheduled", alarm.name);
+                        return Program::Idle;
+                    }
+                }
             }
         }
     }

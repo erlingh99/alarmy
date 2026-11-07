@@ -29,6 +29,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo objcopy --release --bin firmware -- -O binary firmware.bin && \
     awk -F'"' '/^version/{print $2; exit}' ./firmware/Cargo.toml > version.txt
 
+# Sign the image, the Pico only installs updates signed with the key in firmware/signing_key.pub
+FROM ghcr.io/astral-sh/uv:python3.13-alpine AS firmware-signer
+WORKDIR /firmware
+COPY embedded/scripts/signing_key.py ./scripts/
+COPY embedded/firmware/signing_key.pub ./firmware/
+COPY --from=firmware-builder /firmware/firmware.bin .
+RUN --mount=type=secret,id=firmware_signing_key,required=true \
+    uv run scripts/signing_key.py sign --key /run/secrets/firmware_signing_key \
+        firmware.bin firmware.sig
+
 # Final stage
 FROM python:3.13-alpine AS prod
 
@@ -50,6 +60,7 @@ COPY ./backend/alembic.ini ./backend/alembic.ini
 COPY --from=frontend-builder /app/dist ./frontend/dist
 COPY --from=firmware-builder /firmware/firmware.bin ./firmware/firmware.bin
 COPY --from=firmware-builder /firmware/version.txt ./firmware/version.txt
+COPY --from=firmware-signer /firmware/firmware.sig ./firmware/firmware.sig
 
 RUN apk add --no-cache curl tzdata
 
