@@ -38,6 +38,7 @@ pub struct AlarmStatus {
 #[derive(Debug)]
 enum AlarmMsg {
     Refresh,
+    Done(String<36>),
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +57,10 @@ impl AlarmHandle {
     pub fn refresh(&self) {
         self.mailbox.post_or_warn(AlarmMsg::Refresh);
     }
+
+    pub fn done(&self, id: String<36>) {
+        self.mailbox.post_or_warn(AlarmMsg::Done(id));
+    }
 }
 
 /// Fetches the alarms from the backend and hands each one to the state machine when it is due
@@ -70,11 +75,9 @@ struct AlarmScheduler {
     fetch_backoff: Backoff,
     /// So a resync moving the clock back doesn't fire the same trigger twice
     last_fired: Option<PlainDateTime>,
-    /// The alarm last handed to the hardware, so a fetch that drops it can stop it. Not cleared
-    /// when it finishes, as the hardware ignores a stop for an alarm it isn't playing
-    playing: Option<String<36>>,
-    /// Whether the last fetch had more active alarms than fit
-    alarms_dropped: bool,
+    /// The alarm last handed to the hardware, so a fetch that drops or changes it can stop or
+    /// restart it. Cleared when the hardware reports it is done.
+    playing: Option<Alarm>,
 }
 
 /// The outcome of paging through the backend's alarms
@@ -82,9 +85,8 @@ struct Fetched {
     /// The active alarms that trigger soonest
     alarms: Vec<Alarm, MAX_ALARMS>,
     enabled: bool,
-    dropped: bool,
-    /// Whether the playing alarm is still active
-    playing_kept: bool,
+    /// The fetched copy of the playing alarm, if it is still active
+    playing: Option<Alarm>,
 }
 
 impl AlarmScheduler {
@@ -117,6 +119,13 @@ impl AlarmScheduler {
                         self.next_fetch = Instant::now();
                     }
                 }
+                Either4::Second(AlarmMsg::Done(id)) => {
+                    if let Some(playing) = &self.playing
+                        && playing.id == id
+                    {
+                        self.playing = None;
+                    }
+                }
                 Either4::Fourth(new_sync) => sync = new_sync,
             }
 
@@ -142,7 +151,7 @@ impl AlarmScheduler {
                 log::info!("Alarm '{}' due", alarm.name);
                 let elapsed = (now - trigger).whole_seconds().max(0) as u32;
                 self.last_fired = Some(trigger);
-                self.playing = Some(alarm.id.clone());
+                self.playing = Some(alarm.clone());
                 self.hardware.start_alarm(alarm.clone(), elapsed).await;
             }
             None => log::info!("Alarm due, but changed since it was scheduled"),
@@ -156,12 +165,8 @@ impl AlarmScheduler {
                 health::clear(Fault::AlarmFetch);
                 self.fetch_backoff.reset();
                 self.alarms = fetched.alarms;
-                self.alarms_dropped = fetched.dropped;
-                if (!fetched.enabled || !fetched.playing_kept)
-                    && let Some(id) = self.playing.take()
-                {
-                    self.hardware.stop_alarm(id);
-                }
+                let playing = fetched.playing.filter(|_| fetched.enabled);
+                self.update_playing(playing, time.local_now()).await;
                 if self.enabled != Some(fetched.enabled) {
                     log::info!("Alarms enabled: {}", fetched.enabled);
                     // On boot and when re-enabled, so an alarm already mid-sequence starts too
@@ -186,8 +191,7 @@ impl AlarmScheduler {
         let mut fetched = Fetched {
             alarms: Vec::new(),
             enabled: false,
-            dropped: false,
-            playing_kept: false,
+            playing: None,
         };
         let mut after: Option<String<36>> = None;
         loop {
@@ -195,8 +199,14 @@ impl AlarmScheduler {
             fetched.enabled = page.alarms_enabled;
             after = page.alarms.last().map(|alarm| alarm.id.clone());
             for alarm in page.alarms.into_iter().filter(|alarm| alarm.is_active) {
-                fetched.playing_kept |= self.playing.as_ref() == Some(&alarm.id);
-                fetched.dropped |= !keep_soonest(&mut fetched.alarms, alarm, now);
+                if self
+                    .playing
+                    .as_ref()
+                    .is_some_and(|playing| playing.id == alarm.id)
+                {
+                    fetched.playing = Some(alarm.clone());
+                }
+                keep_soonest(&mut fetched.alarms, alarm, now);
             }
             if !page.has_more || after.is_none() {
                 break;
@@ -218,6 +228,30 @@ impl AlarmScheduler {
             })
     }
 
+    /// Keeps the playing alarm if the fetch left it unchanged, restarts it on its new schedule if
+    /// that is still running, and stops it otherwise
+    async fn update_playing(&mut self, fetched: Option<Alarm>, now: PlainDateTime) {
+        let Some(old) = self.playing.take() else {
+            return;
+        };
+        match fetched {
+            Some(new) if new == old => self.playing = Some(new),
+            Some(new) => match new.elapsed_in_alarm(now) {
+                Some(elapsed) => {
+                    log::info!(
+                        "Alarm '{}' changed, restarting at {}s elapsed",
+                        new.name,
+                        elapsed
+                    );
+                    self.playing = Some(new.clone());
+                    self.hardware.start_alarm(new, elapsed).await;
+                }
+                None => self.hardware.stop_alarm(old.id),
+            },
+            None => self.hardware.stop_alarm(old.id),
+        }
+    }
+
     async fn resume_active_alarm(&mut self, now: PlainDateTime) {
         let active = self
             .alarms
@@ -225,7 +259,7 @@ impl AlarmScheduler {
             .find_map(|alarm| Some((alarm.clone(), alarm.elapsed_in_alarm(now)?)));
         if let Some((alarm, elapsed)) = active {
             log::info!("Resuming alarm '{}' at {}s elapsed", alarm.name, elapsed);
-            self.playing = Some(alarm.id.clone());
+            self.playing = Some(alarm.clone());
             self.hardware.start_alarm(alarm, elapsed).await;
         }
     }
@@ -249,15 +283,15 @@ impl AlarmScheduler {
     }
 }
 
-/// Keeps the alarm if there is room or it triggers sooner than one kept, returning false when
-/// one is dropped. A running alarm counts as triggering now, so it is never dropped while it plays.
-fn keep_soonest(kept: &mut Vec<Alarm, MAX_ALARMS>, alarm: Alarm, now: PlainDateTime) -> bool {
+/// Keeps the alarm if there is room or it triggers sooner than one kept. A running alarm counts
+/// as triggering now, so it is never dropped while it plays.
+fn keep_soonest(kept: &mut Vec<Alarm, MAX_ALARMS>, alarm: Alarm, now: PlainDateTime) {
     let secs_until = |alarm: &Alarm| match alarm.elapsed_in_alarm(now) {
         Some(_) => 0,
         None => alarm.time_to_next_trigger(now).unwrap_or(u32::MAX),
     };
     let Err(alarm) = kept.push(alarm) else {
-        return true;
+        return;
     };
     let (latest_idx, latest) = kept
         .iter()
@@ -271,7 +305,6 @@ fn keep_soonest(kept: &mut Vec<Alarm, MAX_ALARMS>, alarm: Alarm, now: PlainDateT
     } else {
         log::warn!("Alarm list full, dropped '{}'", alarm.name);
     }
-    false
 }
 
 pub fn spawn(spawner: Spawner, http_client: &'static HttpClient, hardware: HardwareHandle) {
@@ -285,7 +318,6 @@ pub fn spawn(spawner: Spawner, http_client: &'static HttpClient, hardware: Hardw
         fetch_backoff: Backoff::default(),
         last_fired: None,
         playing: None,
-        alarms_dropped: false,
     };
     spawner.spawn(alarm_task(scheduler).unwrap());
 }

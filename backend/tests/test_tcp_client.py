@@ -17,7 +17,7 @@ async def _serve_like_pico(reply: bytes, *, greeting: bytes = GREETING):
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         writer.write(greeting)
         await writer.drain()
-        if await reader.read(1024):
+        if await reader.readline():
             writer.write(reply)
             await writer.drain()
         writer.close()

@@ -34,7 +34,8 @@ async def send_message_to_led_controller(
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(PICO_HOST, PICO_PORT), timeout=10.0
         )
-        writer.write(message.encode())
+        # The Pico splits commands on newlines
+        writer.write(f"{message}\n".encode())
         await writer.drain()
 
         return await asyncio.wait_for(_read_command_response(reader), timeout=10.0)

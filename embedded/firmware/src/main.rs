@@ -170,7 +170,7 @@ async fn core1_main(
     let led_driver = LedDriver::new(led_pinning);
     let buzzer_driver = BuzzerDriver::new(buzzer_pinning);
     display::spawn(spawner, display_pinning);
-    hardware::spawn(spawner, led_driver, buzzer_driver);
+    hardware::spawn(spawner, led_driver, buzzer_driver, alarm::handle());
 
     input::spawn(
         spawner,

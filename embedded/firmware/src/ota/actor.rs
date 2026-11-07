@@ -229,6 +229,15 @@ impl OtaActor {
         if !record::is_supported(available) {
             return Err(OtaError::UnsupportedVersion);
         }
+        if record::failed() == Some(available) {
+            log::warn!(
+                "OTA: v{}.{}.{} failed before, skipping it until a power cycle",
+                resp.major,
+                resp.minor,
+                resp.patch
+            );
+            return Ok(());
+        }
         let signature = http_client
             .get_firmware_signature()
             .await
@@ -238,15 +247,6 @@ impl OtaActor {
             })?
             .bytes()
             .ok_or(OtaError::Unsigned)?;
-        if record::failed() == Some(available) {
-            log::warn!(
-                "OTA: v{}.{}.{} failed to boot before, skipping it until a power cycle",
-                resp.major,
-                resp.minor,
-                resp.patch
-            );
-            return Ok(());
-        }
 
         log::info!(
             "OTA: v{}.{}.{} available (current v{}.{}.{}), downloading...",
@@ -322,14 +322,15 @@ impl OtaActor {
         // Over the image as served, not the padding
         match updater.verify_and_mark_updated(SIGNING_PUBLIC_KEY, signature, image_len as u32) {
             Ok(()) => log::info!("OTA: Signature valid, DFU marked for swap"),
-            Err(e) => {
+            Err(FirmwareUpdaterError::Signature(_)) => {
+                // So the same image isn't downloaded again on every check
+                Self::record_failed_update();
+                return Err(OtaError::BadSignature);
+            }
+            Err(_) => {
                 // No swap is scheduled, so don't leave the version recorded as being installed
                 record::clear_pending();
-                //TODO should probably record as failed
-                return Err(match e {
-                    FirmwareUpdaterError::Signature(_) => OtaError::BadSignature,
-                    _ => OtaError::Flash,
-                });
+                return Err(OtaError::Flash);
             }
         }
 

@@ -70,9 +70,17 @@ impl TcpServer {
         let _ = writeln!(welcome, "Connected to Alarmy Pico TCP Server");
         let _ = socket.write(welcome.as_bytes()).await;
 
+        // Commands are newline terminated, as a read can hold part of one or several
+        let mut len = 0;
         loop {
+            if len == buffer.len() {
+                log::warn!("TCP command too long, discarded");
+                len = 0;
+                let _ = socket.write(b"ERROR: Command too long\n").await;
+            }
+
             // Read command from client
-            let n = match socket.read(&mut buffer).await {
+            let n = match socket.read(&mut buffer[len..]).await {
                 Ok(0) => {
                     // Connection closed by client
                     break;
@@ -82,25 +90,33 @@ impl TcpServer {
                     return Err(NetworkError::TcpError);
                 }
             };
+            len += n;
 
-            let command = match serde_json_core::from_slice::<TcpCommand>(&buffer[..n]) {
-                Ok((command, _)) => command,
-                Err(_) => {
-                    let response = "ERROR: Invalid command\n";
-                    let _ = socket.write(response.as_bytes()).await;
-                    continue;
+            while let Some(end) = buffer[..len].iter().position(|&b| b == b'\n') {
+                let response = self.respond(&buffer[..end]);
+                if socket.write(response.as_bytes()).await.is_err() {
+                    return Err(NetworkError::TcpError);
                 }
-            };
-
-            log::debug!("Received TCP command: {command:?}");
-
-            let response = self.handle_command(command);
-            if socket.write(response.as_bytes()).await.is_err() {
-                return Err(NetworkError::TcpError);
+                buffer.copy_within(end + 1..len, 0);
+                len -= end + 1;
             }
         }
 
         Ok(())
+    }
+
+    fn respond(&self, line: &[u8]) -> String<32> {
+        match serde_json_core::from_slice::<TcpCommand>(line) {
+            Ok((command, _)) => {
+                log::debug!("Received TCP command: {command:?}");
+                self.handle_command(command)
+            }
+            Err(_) => {
+                let mut response = String::new();
+                let _ = writeln!(response, "ERROR: Invalid command");
+                response
+            }
+        }
     }
 
     fn handle_command(&self, command: TcpCommand) -> String<32> {

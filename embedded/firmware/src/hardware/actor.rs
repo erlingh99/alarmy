@@ -9,6 +9,7 @@ use embassy_time::Instant;
 use heapless::String;
 use smart_leds::RGB8;
 
+use crate::alarm::AlarmHandle;
 use crate::alarm::model::Alarm;
 use crate::buzzer::BuzzerDriver;
 use crate::led::LedDriver;
@@ -148,6 +149,7 @@ impl HardwareHandle {
 struct HardwareActor {
     led_driver: LedDriver,
     buzzer_driver: BuzzerDriver,
+    alarm_scheduler: AlarmHandle,
     mailbox: MailboxReceiver<HardwareMsg>,
     program: Program,
 }
@@ -176,10 +178,25 @@ impl HardwareActor {
         ));
         loop {
             match select(&mut playing, self.mailbox.receive()).await {
-                Either::First(()) => return Program::Idle,
+                Either::First(()) => {
+                    if let Program::Alarm { alarm, .. } = &self.program {
+                        self.alarm_scheduler.done(alarm.id.clone());
+                    }
+                    return Program::Idle;
+                }
                 Either::Second(HardwareMsg::Play(next)) if !next.is_same(&self.program) => {
                     if let Program::Alarm { alarm, .. } = &self.program {
-                        log::info!("Alarm '{}' cancelled", alarm.name);
+                        match &next {
+                            Program::Alarm {
+                                alarm: next_alarm, ..
+                            } if next_alarm.id == alarm.id => {
+                                log::info!("Alarm '{}' updated while playing", alarm.name);
+                            }
+                            _ => {
+                                log::info!("Alarm '{}' cancelled", alarm.name);
+                                self.alarm_scheduler.done(alarm.id.clone());
+                            }
+                        }
                     }
                     return next;
                 }
@@ -189,6 +206,7 @@ impl HardwareActor {
                         && alarm.id == id
                     {
                         log::info!("Alarm '{}' stopped, no longer scheduled", alarm.name);
+                        self.alarm_scheduler.done(alarm.id.clone());
                         return Program::Idle;
                     }
                 }
@@ -247,12 +265,18 @@ async fn play(led: &mut LedDriver, buzzer: &mut BuzzerDriver, program: &Program)
     }
 }
 
-pub fn spawn(spawner: Spawner, led_driver: LedDriver, buzzer_driver: BuzzerDriver) {
+pub fn spawn(
+    spawner: Spawner,
+    led_driver: LedDriver,
+    buzzer_driver: BuzzerDriver,
+    alarm_scheduler: AlarmHandle,
+) {
     let actor = HardwareActor {
         led_driver,
         buzzer_driver,
         mailbox: MAILBOX.receiver(),
         program: Program::Init,
+        alarm_scheduler,
     };
     spawner.spawn(hardware_task(actor).unwrap());
 }
