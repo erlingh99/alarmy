@@ -61,6 +61,7 @@ pub struct HealthResponse {
 }
 
 struct HttpBuffers {
+    tcp: TcpClientState<1, 1024, 4096>,
     tls_read: [u8; 16640],
     tls_write: [u8; 16640],
     rx: [u8; 8192],
@@ -76,6 +77,7 @@ impl HttpClient {
         Self {
             stack,
             http_mutex: Mutex::new(HttpBuffers {
+                tcp: TcpClientState::new(),
                 tls_read: [0; 16640],
                 tls_write: [0; 16640],
                 rx: [0; 8192],
@@ -93,8 +95,7 @@ impl HttpClient {
         let mut guard = self.http_mutex.lock().await;
         let len = {
             let buf = &mut *guard;
-            let client_state = TcpClientState::<1, 1024, 4096>::new();
-            let mut tcp_client = TcpClient::new(*self.stack, &client_state);
+            let mut tcp_client = TcpClient::new(*self.stack, &buf.tcp);
             tcp_client.set_timeout(Some(Duration::from_secs(20)));
             let dns_client = DnsSocket::new(*self.stack);
             let mut rng = RoscRng;
@@ -149,13 +150,12 @@ impl HttpClient {
         mut handler: impl FnMut(&[u8]) -> Result<(), NetworkError>,
     ) -> Result<usize, NetworkError> {
         let mut guard = self.http_mutex.lock().await;
-        let client_state = TcpClientState::<1, 1024, 4096>::new();
-        let mut tcp = TcpClient::new(*self.stack, &client_state);
+        let buffers = &mut *guard;
+        let mut tcp = TcpClient::new(*self.stack, &buffers.tcp);
         tcp.set_timeout(Some(Duration::from_secs(120)));
         let dns = DnsSocket::new(*self.stack);
         let mut rng = RoscRng;
         let seed = rng.next_u64();
-        let buffers = &mut *guard;
         let tls_config = TlsConfig::new(
             seed,
             &mut buffers.tls_read,

@@ -319,6 +319,9 @@ impl OtaActor {
         record::set_pending(version)?;
 
         log::info!("OTA: {flash_offset} total bytes written, verifying signature");
+        // Blocking, as the async updater's 2-byte hash reads fail RP2040's 4-byte alignment in
+        // embassy-boot 0.7.0. Fixed upstream, unreleased:
+        // https://github.com/embassy-rs/embassy/issues/6330, https://github.com/embassy-rs/embassy/pull/6405
         // Over the image as served, not the padding
         match updater.verify_and_mark_updated(SIGNING_PUBLIC_KEY, signature, image_len as u32) {
             Ok(()) => log::info!("OTA: Signature valid, DFU marked for swap"),
