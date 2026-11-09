@@ -1,6 +1,6 @@
 # Alarm Project Frontend
 
-A modern React application for managing alarms with a beautiful UI built using shadcn-ui and Tailwind CSS.
+Frontend for the sunrise alarm
 
 ## Prerequisites
 

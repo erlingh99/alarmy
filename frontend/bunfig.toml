@@ -1,3 +1,7 @@
 [install]
 # Supply chain: ignore releases younger than 10 days
 minimumReleaseAge = 864000
+
+[run]
+# Run package scripts on Bun even when Node is installed
+bun = true

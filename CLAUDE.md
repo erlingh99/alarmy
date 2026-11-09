@@ -28,9 +28,10 @@ Migrations use Alembic (`backend/alembic.ini`, `backend/migrations/`); `init_db(
 ### Frontend (`frontend/`)
 ```bash
 bun install --frozen-lockfile
-bun run dev            # vite dev server
+bun run dev            # vite dev server, /api served by the in-memory mock in mockBackend.ts
+BACKEND_URL=http://localhost:8000 bun run dev   # proxy /api to a real backend instead
 bun run build           # production build
-bun run check           # tsc --noEmit (app + node configs)
+bun run check           # tsc --noEmit
 bun run lint             # eslint
 bun run test             # vitest run
 bun audit                # dependency vulnerability scan
