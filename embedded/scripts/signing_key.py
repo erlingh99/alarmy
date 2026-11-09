@@ -1,6 +1,8 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = ["cryptography>=44"]
+# [tool.uv]
+# exclude-newer = "10 days"
 # ///
 """
 Ed25519 signing of OTA firmware images.

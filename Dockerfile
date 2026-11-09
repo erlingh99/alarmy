@@ -16,8 +16,8 @@ RUN uv sync --frozen --no-dev
 FROM rust:alpine AS firmware-base
 RUN rustup target add thumbv6m-none-eabi && \
     rustup component add llvm-tools && \
-    cargo install flip-link && \
-    cargo install cargo-binutils
+    cargo install --locked flip-link@0.1.12 && \
+    cargo install --locked cargo-binutils@0.4.0
 
 # Builder: compile only the firmware binary
 FROM firmware-base AS firmware-builder
@@ -25,18 +25,20 @@ WORKDIR /firmware
 COPY embedded/ .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/firmware/target \
-    cargo build --release --bin firmware && \
-    cargo objcopy --release --bin firmware -- -O binary firmware.bin && \
+    cargo build --locked --release --bin firmware && \
+    cargo objcopy --locked --release --bin firmware -- -O binary firmware.bin && \
     awk -F'"' '/^version/{print $2; exit}' ./firmware/Cargo.toml > version.txt
 
 # Sign the image, the Pico only installs updates signed with the key in firmware/signing_key.pub
 FROM ghcr.io/astral-sh/uv:python3.13-alpine AS firmware-signer
 WORKDIR /firmware
-COPY embedded/scripts/signing_key.py ./scripts/
+COPY embedded/scripts/signing_key.py embedded/scripts/signing_key.py.lock ./scripts/
+# Install the hash-locked deps before the key is mounted, then sign offline
+RUN uv sync --script scripts/signing_key.py --locked
 COPY embedded/firmware/signing_key.pub ./firmware/
 COPY --from=firmware-builder /firmware/firmware.bin .
 RUN --mount=type=secret,id=firmware_signing_key,required=true \
-    uv run scripts/signing_key.py sign --key /run/secrets/firmware_signing_key \
+    uv run --locked --offline scripts/signing_key.py sign --key /run/secrets/firmware_signing_key \
         firmware.bin firmware.sig
 
 # Final stage

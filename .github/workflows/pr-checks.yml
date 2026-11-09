@@ -15,7 +15,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --locked --group dev
         working-directory: backend
       - name: Type check
         run: uv run ty check
@@ -61,12 +61,12 @@ jobs:
         with:
           targets: thumbv6m-none-eabi
       - name: Check
-        run: cargo check
+        run: cargo check --locked
         working-directory: embedded
       - name: Clippy
-        run: cargo clippy
+        run: cargo clippy --locked
         working-directory: embedded
       # Host-only build dependency, excluded from the Pico workspace
       - name: Clippy (memory-layout)
-        run: cargo clippy
+        run: cargo clippy --locked
         working-directory: embedded/memory-layout

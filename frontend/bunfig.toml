@@ -1,0 +1,3 @@
+[install]
+# Supply chain: ignore releases younger than 10 days
+minimumReleaseAge = 864000

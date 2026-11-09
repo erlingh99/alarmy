@@ -85,3 +85,7 @@ docker compose up -d --build
 The `alarmy-backup` service in `docker-compose.yml` (`offen/docker-volume-backup:v2`) archives the `alarmy_data` volume (`alarms.db`) nightly at 03:00 to `${BACKUP_ARCHIVE_ROOT}/alarmy` on the host, keeping 30 days of `.tar.gz` files (older ones pruned automatically). `BACKUP_ARCHIVE_ROOT` must be set on the host (same mechanism as `${DNS_IP}`) to the mount point of the external backup HDD, e.g. `/mnt/backup-hdd`. During each backup the `alarmy` container is briefly stopped and restarted (via the `docker-volume-backup.stop-during-backup` label) to guarantee a consistent copy of the SQLite file.
 
 To restore: `docker compose stop alarmy`, extract the desired `alarmy-<timestamp>.tar.gz` from the archive directory so `alarms.db` lands back at the `alarmy_data` volume's `/app/data` path, then `docker compose start alarmy`.
+
+## Supply chain
+
+Dependencies are locked and installed only from lockfiles (`bun install --frozen-lockfile`, `uv sync --locked`/`--frozen`, `cargo --locked`), and new releases are ignored for 10 days (`minimumReleaseAge` in `frontend/bunfig.toml`, `exclude-newer` in `backend/pyproject.toml` and the `signing_key.py` script metadata). `signing_key.py` has its own lock (`signing_key.py.lock`, refresh with `uv lock --script scripts/signing_key.py` from `embedded/`); the Docker signer stage installs from it before the key is mounted and signs offline.
