@@ -6,7 +6,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
 use embassy_time::Duration;
 use embedded_io_async::Read as _;
-use heapless::Vec;
+use heapless::{String, Vec, format};
 use reqwless::client::{HttpClient as ReqwlessClient, TlsConfig, TlsVerify};
 use reqwless::headers::ContentType;
 use reqwless::request::{Method, RequestBuilder};
@@ -14,28 +14,33 @@ use serde::Deserialize;
 
 use crate::alarm::model::Alarm;
 use crate::config::api_config::{
-    ALARM_SYNC_ROUTE, FIRMWARE_VERSION_ROUTE, HEALTH_ROUTE, LOG_ROUTE, TIME_ROUTE,
+    ALARM_PAGE_SIZE, ALARM_SYNC_ROUTE, FIRMWARE_SIGNATURE_ROUTE, FIRMWARE_VERSION_ROUTE,
+    HEALTH_ROUTE, LOG_ROUTE, TIME_ROUTE,
 };
 use crate::health::Backoff;
-use crate::ota::VersionResponse;
+use crate::ota::{SignatureResponse, VersionResponse};
 use crate::time_lib::model::ApiTimeType;
 
 /// Up to 20 s between checks, so an OTA boot confirmation can't back off past its deadline
 const BACKEND_WAIT_MAX_DOUBLINGS: u32 = 2;
 
-/// Device-facing payload from the backend. The arming flag travels with the
+/// A page of the active alarms, sorted by id. The arming flag travels with the
 /// alarms so there is no window on boot where the device holds alarms but not
 /// yet the arming state.
 #[derive(Deserialize, Debug)]
-pub struct AlarmSync {
-    pub alarms: Vec<Alarm, 8>,
+pub struct AlarmPage {
+    pub alarms: Vec<Alarm, ALARM_PAGE_SIZE>,
     pub alarms_enabled: bool,
+    pub has_more: bool,
 }
 
 #[derive(Debug)]
 pub enum NetworkError {
     BackendDown,
     RequestFailed,
+    /// The backend answered with a non-2xx status
+    #[allow(dead_code)] // Read through Debug when reported
+    HttpStatus(u16),
     ReadError,
     ParseError,
     FlashError,
@@ -56,6 +61,7 @@ pub struct HealthResponse {
 }
 
 struct HttpBuffers {
+    tcp: TcpClientState<1, 1024, 4096>,
     tls_read: [u8; 16640],
     tls_write: [u8; 16640],
     rx: [u8; 8192],
@@ -71,6 +77,7 @@ impl HttpClient {
         Self {
             stack,
             http_mutex: Mutex::new(HttpBuffers {
+                tcp: TcpClientState::new(),
                 tls_read: [0; 16640],
                 tls_write: [0; 16640],
                 rx: [0; 8192],
@@ -88,8 +95,7 @@ impl HttpClient {
         let mut guard = self.http_mutex.lock().await;
         let len = {
             let buf = &mut *guard;
-            let client_state = TcpClientState::<1, 1024, 4096>::new();
-            let mut tcp_client = TcpClient::new(*self.stack, &client_state);
+            let mut tcp_client = TcpClient::new(*self.stack, &buf.tcp);
             tcp_client.set_timeout(Some(Duration::from_secs(20)));
             let dns_client = DnsSocket::new(*self.stack);
             let mut rng = RoscRng;
@@ -115,6 +121,9 @@ impl HttpClient {
                 .send(&mut buf.rx[..rx_size])
                 .await
                 .map_err(|_| NetworkError::RequestFailed)?;
+            if !response.status.is_successful() {
+                return Err(NetworkError::HttpStatus(response.status.0));
+            }
 
             let body_bytes = response
                 .body()
@@ -141,13 +150,12 @@ impl HttpClient {
         mut handler: impl FnMut(&[u8]) -> Result<(), NetworkError>,
     ) -> Result<usize, NetworkError> {
         let mut guard = self.http_mutex.lock().await;
-        let client_state = TcpClientState::<1, 1024, 4096>::new();
-        let mut tcp = TcpClient::new(*self.stack, &client_state);
+        let buffers = &mut *guard;
+        let mut tcp = TcpClient::new(*self.stack, &buffers.tcp);
         tcp.set_timeout(Some(Duration::from_secs(120)));
         let dns = DnsSocket::new(*self.stack);
         let mut rng = RoscRng;
         let seed = rng.next_u64();
-        let buffers = &mut *guard;
         let tls_config = TlsConfig::new(
             seed,
             &mut buffers.tls_read,
@@ -168,8 +176,7 @@ impl HttpClient {
             .map_err(|_| NetworkError::RequestFailed)?;
 
         if !response.status.is_successful() {
-            log::error!("HTTP request failed with status {:#?}", response.status);
-            return Err(NetworkError::RequestFailed);
+            return Err(NetworkError::HttpStatus(response.status.0));
         }
 
         let mut body = response.body().reader();
@@ -189,12 +196,18 @@ impl HttpClient {
         Ok(total)
     }
 
-    pub async fn get_alarm_sync(&self) -> Result<AlarmSync, NetworkError> {
-        log::debug!("Making HTTP request to {ALARM_SYNC_ROUTE}");
-        let (guard, len) = self
-            .make_http_request(Method::GET, ALARM_SYNC_ROUTE, None)
-            .await?;
-        serde_json_core::de::from_slice::<AlarmSync>(&guard.rx[..len])
+    /// The page of active alarms following the one with id `after`, or the first page
+    pub async fn get_alarm_page(&self, after: Option<&str>) -> Result<AlarmPage, NetworkError> {
+        let url: String<128> = match after {
+            Some(id) => {
+                format!("{ALARM_SYNC_ROUTE}?only_active=true&limit={ALARM_PAGE_SIZE}&after={id}")
+            }
+            None => format!("{ALARM_SYNC_ROUTE}?only_active=true&limit={ALARM_PAGE_SIZE}"),
+        }
+        .map_err(|_| NetworkError::RequestFailed)?;
+        log::debug!("Making HTTP request to {url}");
+        let (guard, len) = self.make_http_request(Method::GET, &url, None).await?;
+        serde_json_core::de::from_slice::<AlarmPage>(&guard.rx[..len])
             .map(|(v, _)| v)
             .map_err(|e| {
                 log::error!("Failed to parse alarm sync JSON: {e}");
@@ -248,6 +261,19 @@ impl HttpClient {
             .map(|(v, _)| v)
             .map_err(|_| {
                 log::error!("Failed to parse firmware version response");
+                NetworkError::ParseError
+            })
+    }
+
+    pub async fn get_firmware_signature(&self) -> Result<SignatureResponse, NetworkError> {
+        log::debug!("Getting remote firmware signature");
+        let (guard, len) = self
+            .make_http_request(Method::GET, FIRMWARE_SIGNATURE_ROUTE, None)
+            .await?;
+        serde_json_core::de::from_slice::<SignatureResponse>(&guard.rx[..len])
+            .map(|(v, _)| v)
+            .map_err(|_| {
+                log::error!("Failed to parse firmware signature response");
                 NetworkError::ParseError
             })
     }

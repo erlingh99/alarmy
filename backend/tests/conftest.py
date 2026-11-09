@@ -10,6 +10,7 @@ from app.communication import tcp_client
 from app.database.models import Base
 from app.database.setup import get_db
 from app.routes.alarm_api import alarm_router
+from app.routes.firmware_api import firmware_router
 from app.routes.health_api import health_router
 from app.routes.logging_api import logging_router
 from app.routes.mode_api import mode_router
@@ -46,7 +47,7 @@ async def _serve_like_pico(reply: bytes, *, greeting: bytes = GREETING):
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         writer.write(greeting)
         await writer.drain()
-        if await reader.read(1024):
+        if await reader.readline():
             writer.write(reply)
             await writer.drain()
         writer.close()
@@ -87,6 +88,7 @@ async def client(db_engine):
 
     test_app = FastAPI()
     test_app.include_router(alarm_router)
+    test_app.include_router(firmware_router)
     test_app.include_router(health_router)
     test_app.include_router(logging_router)
     test_app.include_router(time_router)

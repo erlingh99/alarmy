@@ -14,7 +14,7 @@ use heapless::String;
 use ssd1306::mode::{BufferedGraphicsModeAsync, DisplayConfigAsync};
 use ssd1306::prelude::{DisplayRotation, DisplaySize128x64, I2CInterface};
 use ssd1306::{I2CDisplayInterface, Ssd1306Async};
-use time::OffsetDateTime;
+use time::PlainDateTime;
 
 use crate::config::display_config::I2C_ADDRESS;
 use crate::hardware::HardwareState;
@@ -43,7 +43,7 @@ pub struct DisplayPinning {
 
 #[derive(Debug, Clone)]
 pub(super) struct DisplayInfo {
-    pub(super) time: Option<OffsetDateTime>,
+    pub(super) time: Option<PlainDateTime>,
     pub(super) next_alarm: Option<(String<32>, time::Time)>,
     pub(super) wifi_connected: bool,
     pub(super) alarms_enabled: bool,
@@ -151,7 +151,7 @@ impl DisplayDriver {
     }
 }
 
-fn format_clock(time: Option<OffsetDateTime>) -> String<8> {
+fn format_clock(time: Option<PlainDateTime>) -> String<8> {
     let mut s = String::new();
     match time {
         Some(t) => {
@@ -169,7 +169,7 @@ fn format_next_alarm(next_alarm: &Option<(String<32>, time::Time)>) -> String<32
     match next_alarm {
         Some((name, time)) => {
             let _ = write!(s, "Next: {:02}:{:02} ", time.hour(), time.minute());
-            for c in name.chars().take(12) {
+            for c in name.chars().take(9) {
                 let _ = s.push(c);
             }
         }

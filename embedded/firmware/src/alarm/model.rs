@@ -1,10 +1,12 @@
 //! Alarm data structures and deserialization
+use core::fmt;
 use core::iter::once;
 use heapless::{String, Vec};
 use micromath::F32Ext;
-use serde::Deserialize;
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer};
 use smart_leds::RGB8;
-use time::{Date, Duration, OffsetDateTime, Time, UtcOffset};
+use time::{Date, Duration, PlainDateTime, Time};
 
 use crate::led::deserialize::deserialize_hex;
 use crate::time_lib::deserialize::{deserialize_option_date_vec, deserialize_time};
@@ -145,6 +147,7 @@ pub struct Alarm {
     // pub created_at: OffsetDateTime, //don't care about these fields
     // #[serde(with = "time::serde::iso8601")]
     // pub updated_at: OffsetDateTime,
+    #[serde(deserialize_with = "deserialize_truncated")]
     pub name: String<32>,
     #[serde(deserialize_with = "deserialize_time")]
     pub time: Time,
@@ -162,10 +165,41 @@ fn default_play_melody() -> bool {
     true
 }
 
+/// Cuts the string at a char boundary to fit, as the backend caps names in chars, not bytes
+fn deserialize_truncated<'de, D, const N: usize>(deserializer: D) -> Result<String<N>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct TruncatingVisitor<const N: usize>;
+
+    impl<'de, const N: usize> Visitor<'de> for TruncatingVisitor<N> {
+        type Value = String<N>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let mut truncated = String::new();
+            for c in value.chars() {
+                if truncated.push(c).is_err() {
+                    break;
+                }
+            }
+            Ok(truncated)
+        }
+    }
+
+    deserializer.deserialize_str(TruncatingVisitor)
+}
+
 impl Alarm {
     /// Seconds into the alarm's current occurrence, or None if it isn't running. An alarm runs
     /// from its trigger for `length` minutes.
-    pub fn elapsed_in_alarm(&self, now: OffsetDateTime) -> Option<u32> {
+    pub fn elapsed_in_alarm(&self, now: PlainDateTime) -> Option<u32> {
         if !self.is_active {
             return None;
         }
@@ -177,13 +211,13 @@ impl Alarm {
     }
 
     /// Seconds until the alarm next triggers, rounded up
-    pub fn time_to_next_trigger(&self, now: OffsetDateTime) -> Result<u32, AlarmError> {
+    pub fn time_to_next_trigger(&self, now: PlainDateTime) -> Result<u32, AlarmError> {
         Ok(secs_until(self.next_trigger(now)? - now))
     }
 
     /// When the alarm next triggers after `now`: its time minus its length. Errors if the alarm
     /// is invalid.
-    pub fn next_trigger(&self, now: OffsetDateTime) -> Result<OffsetDateTime, AlarmError> {
+    pub fn next_trigger(&self, now: PlainDateTime) -> Result<PlainDateTime, AlarmError> {
         match self.recurrence.recurrence_type {
             RecurrenceType::Daily => {
                 let mut next_time =
@@ -215,8 +249,8 @@ impl Alarm {
                 if let Some(dates) = &self.recurrence.custom_dates {
                     // Sorted on deserialize
                     for date in dates {
-                        let next_time = date.with_time(self.time).assume_offset(UtcOffset::UTC)
-                            - Duration::minutes(self.length as i64);
+                        let next_time =
+                            date.with_time(self.time) - Duration::minutes(self.length as i64);
                         if next_time > now {
                             return Ok(next_time);
                         }

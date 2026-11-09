@@ -1,11 +1,17 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from ..communication import send_message_to_led_controller
 from ..database import delete_alarm as db_delete_alarm
-from ..database import get_alarm_by_id, get_alarms_enabled, load_alarms, save_alarm
+from ..database import (
+    get_alarm_by_id,
+    get_alarms_enabled,
+    load_alarms,
+    load_alarms_page,
+    save_alarm,
+)
 from ..database import update_alarm as db_update_alarm
 from ..dependencies import DbSession
 from ..models import Alarm, AlarmSync, AlarmUpdate
@@ -20,12 +26,22 @@ async def get_alarms(db: DbSession) -> list[Alarm]:
 
 
 @alarm_router.get("/sync", response_model=AlarmSync)
-async def sync_alarms(db: DbSession) -> AlarmSync:
-    """Device-facing payload: alarms and arming state in one response."""
-    alarms = await load_alarms(db)
+async def sync_alarms(
+    db: DbSession,
+    after: UUID | None = None,
+    limit: int | None = Query(default=None, ge=1),
+    only_active: bool = False,
+) -> AlarmSync:
+    """Device-facing payload: alarms and arming state in one response.
+
+    Paged by id with `after` (the last id of the previous page) and `limit`, so
+    the Pico can fetch any number of alarms with fixed-size buffers.
+    """
+    alarms, has_more = await load_alarms_page(db, after, limit, only_active)
     return AlarmSync(
-        alarms=list(alarms.values()),
+        alarms=alarms,
         alarms_enabled=await get_alarms_enabled(db),
+        has_more=has_more,
     )
 
 

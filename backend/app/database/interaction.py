@@ -19,6 +19,22 @@ async def load_alarms(db: AsyncSession) -> dict[UUID, Alarm]:
     return {alarm.id: alarm.to_model() for alarm in alarms}
 
 
+async def load_alarms_page(
+    db: AsyncSession, after: UUID | None, limit: int | None, only_active: bool
+) -> tuple[list[Alarm], bool]:
+    """Alarms sorted by id, starting after `after`, and whether more follow."""
+    query = select(AlarmDB).order_by(AlarmDB.id)
+    if only_active:
+        query = query.where(AlarmDB.is_active)
+    if after is not None:
+        query = query.where(AlarmDB.id > after)
+    if limit is not None:
+        query = query.limit(limit + 1)
+    alarms = (await db.execute(query)).scalars().all()
+    has_more = limit is not None and len(alarms) > limit
+    return [alarm.to_model() for alarm in alarms[:limit]], has_more
+
+
 async def get_alarm_by_id(db: AsyncSession, alarm_id: UUID) -> Alarm | None:
     """Get a single alarm by ID."""
     result = await db.execute(select(AlarmDB).where(AlarmDB.id == alarm_id))

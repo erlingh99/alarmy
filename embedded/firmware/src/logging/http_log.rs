@@ -28,8 +28,27 @@ impl HttpLogUploader {
                 }
             }
 
-            if let Ok(json) = serde_json_core::to_vec::<_, JSON_CAPACITY>(&batch) {
-                let _ = self.http_client.post_log(&json).await;
+            self.post(&batch).await;
+        }
+    }
+
+    /// Posts the lines, halving any part whose JSON escaping overflows the buffer
+    async fn post(&self, lines: &[String<LINE_LEN>]) {
+        let mut parts: Vec<&[String<LINE_LEN>], LOG_LINE_CAPACITY> = Vec::new();
+        let _ = parts.push(lines);
+        while let Some(part) = parts.pop() {
+            match serde_json_core::to_vec::<_, JSON_CAPACITY>(part) {
+                Ok(json) => {
+                    let _ = self.http_client.post_log(&json).await;
+                }
+                // A single line always fits, even fully escaped
+                Err(_) if part.len() > 1 => {
+                    let (first, second) = part.split_at(part.len() / 2);
+                    // Popped last first, so the lines go out in order
+                    let _ = parts.push(second);
+                    let _ = parts.push(first);
+                }
+                Err(_) => {}
             }
         }
     }
