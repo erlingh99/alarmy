@@ -5,11 +5,44 @@ on:
     branches: [ main ]
 
 jobs:
-  backend-checks:
+  changes:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      embedded: ${{ steps.filter.outputs.embedded }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            workflow: &workflow
+              - '.github/workflows/pr-checks.yml'
+            backend:
+              - *workflow
+              - 'backend/**'
+            frontend:
+              - *workflow
+              - 'frontend/**'
+            embedded:
+              - *workflow
+              - 'embedded/Cargo.*'
+              - 'embedded/.cargo/**'
+              - 'embedded/bootloader/**'
+              - 'embedded/firmware/**'
+              - 'embedded/memory-layout/**'
+              - 'embedded/memory_layout.toml'
+              - 'embedded/cyw43-firmware/**'
+
+  backend-checks:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
@@ -28,10 +61,11 @@ jobs:
         working-directory: backend
 
   frontend-checks:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@v7
       - name: Set up Bun
@@ -50,16 +84,23 @@ jobs:
         working-directory: frontend
 
   embedded-checks:
+    needs: changes
+    if: needs.changes.outputs.embedded == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv6m-none-eabi
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            embedded -> target
+            embedded/memory-layout -> target
       - name: Check
         run: cargo check --locked
         working-directory: embedded
